@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["data", "warehouse/target", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]  # line length handled above; long SQL strings are fine
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
