@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: "Landing tables populated by the streaming/feature layer."
+    tables:
+      - name: ohlcv_10s
+        description: "10-second OHLCV bars + order-flow features, one row per symbol per window."
+        columns:
+          - name: symbol
+            tests: [not_null]
+          - name: window_start
+            tests: [not_null]
+          - name: close
+            tests: [not_null]
