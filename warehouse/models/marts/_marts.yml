@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: mart_ml_features
+    description: "Model-ready feature matrix with next-bar direction label."
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: label_up_3
+        description: "1 if price is higher 3 bars ahead, else 0."
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]
+      - name: volatility_30
+        tests: [not_null]
+
+  - name: mart_symbol_snapshot
+    description: "Latest feature snapshot per symbol for dashboards and the LLM agent."
+    columns:
+      - name: symbol
+        tests:
+          - not_null
+          - unique
+      - name: last_price
+        tests: [not_null]
