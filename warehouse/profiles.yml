@@ -1,0 +1,8 @@
+# dbt profile for local DuckDB. Path is relative to the warehouse/ dir.
+cryptostream:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "../data/warehouse/crypto.duckdb"
+      threads: 4
