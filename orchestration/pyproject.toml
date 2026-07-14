@@ -1,0 +1,8 @@
+[project]
+name = "cryptostream_dagster"
+version = "1.0.0"
+requires-python = ">=3.10"
+
+[tool.dagster]
+module_name = "cryptostream_dagster.definitions"
+code_location_name = "cryptostream"
