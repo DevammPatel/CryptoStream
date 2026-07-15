@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install duckdb pandas numpy pyarrow scikit-learn lightgbm joblib \
+                      fastapi "uvicorn[standard]" pydantic httpx \
+                      dbt-core dbt-duckdb pytest ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Build dbt models + data tests
+        run: |
+          python scripts/generate_sample_data.py --minutes 120
+          cd warehouse && dbt build --profiles-dir .
+
+      - name: Unit / integration tests
+        run: pytest -q
