@@ -1,0 +1,24 @@
+{
+  "metrics": {
+    "cv_auc": 0.5032088256210456,
+    "test_auc": 0.5150684931506849,
+    "test_accuracy": 0.5104895104895105,
+    "test_f1": 0.43089430894308944,
+    "test_precision": 0.5,
+    "test_recall": 0.37857142857142856,
+    "n_train": 1144,
+    "n_test": 286,
+    "base_rate": 0.46923076923076923
+  },
+  "feature_importance": {
+    "ret_1": 1562,
+    "log_ret_1": 422,
+    "px_vs_sma30": 1796,
+    "volatility_30": 1840,
+    "order_flow_imbalance": 1717,
+    "ofi_6": 1731,
+    "rel_volume": 1709,
+    "trade_count": 1223
+  },
+  "mlflow_run_id": null
+}
