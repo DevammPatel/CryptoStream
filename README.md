@@ -144,18 +144,3 @@ signal to learn, which the walk-forward CV honestly reflects. Point the live pip
 at real Binance data and let it collect history to evaluate genuine predictive edge.
 This project is engineered to be honest about model quality rather than to overfit a toy
 dataset — an intentional signal of ML maturity.
-
----
-
-## Resume bullet (copy/paste)
-
-> Built an end-to-end real-time data platform ingesting live crypto trades via
-> WebSockets through a Kafka (Redpanda) + Spark Structured Streaming pipeline into a
-> MinIO data lake and dbt-modeled DuckDB warehouse; trained and served a LightGBM
-> price-direction model (walk-forward validated, tracked in MLflow) behind a FastAPI
-> API, added an LLM market-summary agent, and shipped a live Streamlit dashboard —
-> orchestrated with Dagster, fully Dockerized, with CI and data-quality tests.
-
-## License
-
-MIT
