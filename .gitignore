@@ -9,3 +9,9 @@ __pycache__/
 dist/
 build/
 .DS_Store
+data/
+warehouse/logs/
+warehouse/target/
+warehouse/.user.yml
+ml/models/*.pkl
+ml/models/model_meta.json

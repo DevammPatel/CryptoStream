@@ -7,7 +7,7 @@ confluent-kafka==2.4.0
 
 # Storage / warehouse
 duckdb==1.0.0
-pyarrow==16.1.0
+pyarrow==15.0.0
 s3fs==2024.6.0
 pandas==2.2.2
 numpy==1.26.4
