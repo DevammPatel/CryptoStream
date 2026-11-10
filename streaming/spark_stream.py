@@ -70,7 +70,7 @@ def read_trades(spark: SparkSession):
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", TRADES_TOPIC)
-        .option("startingOffsets", "latest")
+        .option("startingOffsets", "earliest")
         .option("maxOffsetsPerTrigger", 20000)
         .load()
     )
