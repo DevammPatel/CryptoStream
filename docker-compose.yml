@@ -1,5 +1,3 @@
-version: "3.9"
-
 # CryptoStream — full local real-time data platform.
 # Everything here runs free on your laptop. `docker compose up -d` starts the stack.
 
