@@ -1,4 +1,4 @@
-.PHONY: help up down logs ps clean ingest-local features train api dashboard dbt test lint fmt seed
+.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster dbt test lint fmt seed
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -36,6 +36,9 @@ api:  ## Run the FastAPI server locally
 
 dashboard:  ## Run the Streamlit dashboard locally
 	streamlit run dashboard/app.py
+
+dagster:  ## Run the Dagster UI and the 15-minute schedule
+	dagster dev -m cryptostream_dagster.definitions
 
 dbt:  ## Run dbt models + tests
 	cd warehouse && dbt build --profiles-dir .

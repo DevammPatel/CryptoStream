@@ -1,7 +1,14 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cryptostream_dagster"
 version = "1.0.0"
 requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = ["cryptostream_dagster"]
 
 [tool.dagster]
 module_name = "cryptostream_dagster.definitions"

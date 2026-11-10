@@ -83,7 +83,7 @@ make ps           # check services
 
 # Build marts + train on the collected data (and schedule retraining):
 pip install -r requirements.txt
-dagster dev -m cryptostream_dagster.definitions -w orchestration   # http://localhost:3000
+make dagster      # http://localhost:3000
 ```
 
 ---
