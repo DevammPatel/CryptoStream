@@ -20,6 +20,7 @@ import sys
 import duckdb
 from dagster import (
     AssetExecutionContext,
+    DefaultScheduleStatus,
     Definitions,
     MaterializeResult,
     MetadataValue,
@@ -102,7 +103,11 @@ def market_summary(context: AssetExecutionContext) -> MaterializeResult:
 refresh_job = define_asset_job("refresh_pipeline", selection="*")
 
 # Retrain / refresh every 15 minutes (adjust cadence to taste).
-refresh_schedule = ScheduleDefinition(job=refresh_job, cron_schedule="*/15 * * * *")
+refresh_schedule = ScheduleDefinition(
+    job=refresh_job,
+    cron_schedule="*/15 * * * *",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
 
 defs = Definitions(
     assets=[lake_to_duckdb, dbt_models, ml_model, market_summary],

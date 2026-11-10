@@ -5,6 +5,7 @@ Covered:
   - synthetic data generation + DuckDB round-trip
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
+  - Dagster definitions load and the refresh schedule is on
 
 Run:  pytest -q
 """
@@ -20,6 +21,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "ml"))
 sys.path.insert(0, os.path.join(REPO, "ingestion"))
+sys.path.insert(0, os.path.join(REPO, "orchestration"))
 
 
 def test_normalise_trade():
@@ -99,3 +101,11 @@ def test_prediction_from_model(sample_data):
     model, feats = payload["model"], payload["features"]
     proba = model.predict_proba(np.zeros((1, len(feats))))[:, 1][0]
     assert 0.0 <= proba <= 1.0
+
+
+def test_dagster_definitions_load():
+    from cryptostream_dagster.definitions import defs, refresh_schedule
+    from dagster import DefaultScheduleStatus
+
+    assert defs.get_job_def("refresh_pipeline") is not None
+    assert refresh_schedule.default_status == DefaultScheduleStatus.RUNNING
