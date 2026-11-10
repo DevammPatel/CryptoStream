@@ -40,39 +40,26 @@ services:
       KAFKA_BROKERS: redpanda:29092
 
   # ---------------------------------------------------------------------------
-  # MinIO — S3-compatible object store used as the raw data lake
+  # SeaweedFS — S3-compatible object store used as the raw data lake.
+  # `mini` runs every SeaweedFS component in one process and creates the bucket.
   # ---------------------------------------------------------------------------
-  minio:
-    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-    container_name: cs-minio
-    command: server /data --console-address ":9001"
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.52
+    container_name: cs-seaweedfs
+    command: ["mini", "-dir=/data", "-bucket=${LAKE_BUCKET:-crypto-lake}"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${LAKE_ACCESS_KEY:-lakeadmin}
+      AWS_SECRET_ACCESS_KEY: ${LAKE_SECRET_KEY:-lakeadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "8333:8333"   # S3 API
+      - "8888:8888"   # file browser
     volumes:
-      - minio-data:/data
+      - lake-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8333/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10
-
-  # Create the lake bucket on startup
-  minio-setup:
-    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
-    container_name: cs-minio-setup
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      until (mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}) do echo 'waiting for minio'; sleep 2; done;
-      mc mb --ignore-existing local/${LAKE_BUCKET:-crypto-lake};
-      echo 'bucket ready';
-      exit 0;
-      "
 
   # ---------------------------------------------------------------------------
   # Ingestion — Binance WebSocket → Redpanda
@@ -98,14 +85,14 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: redpanda:29092
       TRADES_TOPIC: ${TRADES_TOPIC:-crypto.trades}
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      LAKE_ENDPOINT: http://seaweedfs:8333
+      LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:-lakeadmin}
+      LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:-lakeadmin}
       LAKE_BUCKET: ${LAKE_BUCKET:-crypto-lake}
     restart: unless-stopped
 
@@ -162,6 +149,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  minio-data:
+  lake-data:
   mlflow-data:
   warehouse-data:

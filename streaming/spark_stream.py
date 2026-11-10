@@ -1,7 +1,7 @@
-"""Spark Structured Streaming: Kafka trades -> features -> Parquet lake (MinIO).
+"""Spark Structured Streaming: Kafka trades -> features -> Parquet lake (SeaweedFS).
 
 Reads the raw trade stream from Redpanda, computes windowed OHLCV + micro-structure
-features per symbol, and writes them as Parquet to the S3-compatible MinIO lake.
+features per symbol, and writes them as Parquet to the S3-compatible SeaweedFS lake.
 
 Two sinks:
   1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, exactly-once via checkpoint)
@@ -27,9 +27,9 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "redpanda:29092")
 TRADES_TOPIC = os.getenv("TRADES_TOPIC", "crypto.trades")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+LAKE_ENDPOINT = os.getenv("LAKE_ENDPOINT", "http://seaweedfs:8333")
+LAKE_ACCESS_KEY = os.getenv("LAKE_ACCESS_KEY", "lakeadmin")
+LAKE_SECRET_KEY = os.getenv("LAKE_SECRET_KEY", "lakeadmin")
 LAKE_BUCKET = os.getenv("LAKE_BUCKET", "crypto-lake")
 
 TRADE_SCHEMA = StructType(
@@ -49,9 +49,9 @@ def build_spark() -> SparkSession:
     spark = (
         SparkSession.builder.appName("cryptostream-features")
         .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
-        .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY)
-        .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY)
+        .config("spark.hadoop.fs.s3a.endpoint", LAKE_ENDPOINT)
+        .config("spark.hadoop.fs.s3a.access.key", LAKE_ACCESS_KEY)
+        .config("spark.hadoop.fs.s3a.secret.key", LAKE_SECRET_KEY)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")

@@ -150,4 +150,4 @@ with right:
     except Exception as exc:
         st.caption(f"Summary unavailable: {exc}")
 
-st.caption("Data: Binance public WebSocket · Pipeline: Redpanda → Spark → MinIO → dbt/DuckDB → LightGBM → FastAPI")
+st.caption("Data: Binance public WebSocket · Pipeline: Redpanda → Spark → SeaweedFS → dbt/DuckDB → LightGBM → FastAPI")

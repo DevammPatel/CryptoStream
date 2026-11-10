@@ -18,7 +18,7 @@ flowchart LR
     end
 
     subgraph Lake & Warehouse
-        MINIO[(MinIO\nS3 Parquet lake)]
+        LAKE[(SeaweedFS\nS3 Parquet lake)]
         DUCK[(DuckDB\nserving DB)]
         DBT[dbt\nstaging - intermediate - marts\n+ data tests]
     end
@@ -35,8 +35,8 @@ flowchart LR
         DASH[Streamlit\ndashboard]
     end
 
-    B --> P --> RP --> SP --> MINIO
-    MINIO --> DAG
+    B --> P --> RP --> SP --> LAKE
+    LAKE --> DAG
     DAG --> DBT --> DUCK
     DUCK --> TRAIN --> MLF
     TRAIN --> API
@@ -52,7 +52,7 @@ flowchart LR
 
 | Job family | What in this repo demonstrates it |
 |---|---|
-| **Data Engineering** | Kafka/Redpanda ingestion, Spark Structured Streaming, MinIO S3 data lake, Dagster orchestration, Dockerized services |
+| **Data Engineering** | Kafka/Redpanda ingestion, Spark Structured Streaming, SeaweedFS S3 data lake, Dagster orchestration, Dockerized services |
 | **Data Analytics** | dbt models (staging → intermediate → marts), data-quality tests, technical indicators, Streamlit BI dashboard |
 | **Data Science** | Feature engineering, walk-forward time-series validation, LightGBM classifier, MLflow experiment tracking |
 | **AI / ML** | Model serving via FastAPI, model reload/monitoring hooks, LLM market-summary agent (RAG-style over live stats) |
@@ -83,6 +83,6 @@ bars / ~30s ahead is higher than the current close).
 
 1. **Offline demo (fastest, no Docker/network):** `make seed` generates realistic
    synthetic bars → `make dbt` → `make train` → `make api` + `make dashboard`.
-2. **Full live stack:** `make up` starts Redpanda, MinIO, Spark, MLflow, the API and
+2. **Full live stack:** `make up` starts Redpanda, SeaweedFS, Spark, MLflow, the API and
    dashboard in Docker; the ingestion service streams live Binance trades. Run the
    Dagster batch layer (`dagster dev`) to build marts + retrain on a schedule.

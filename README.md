@@ -1,7 +1,7 @@
 # 📈 CryptoStream — Real-Time Crypto Analytics & Prediction Platform
 
 An **end-to-end, real-time data platform** that ingests live crypto market data over
-WebSockets, streams it through **Redpanda (Kafka) → Spark → a MinIO data lake**, models
+WebSockets, streams it through **Redpanda (Kafka) → Spark → a SeaweedFS data lake**, models
 it with **dbt** into a DuckDB warehouse, trains a **LightGBM** price-direction model
 tracked in **MLflow**, serves predictions via **FastAPI**, generates an **LLM market
 summary**, and visualizes everything in a live **Streamlit** dashboard — all
@@ -17,7 +17,7 @@ orchestrated by **Dagster** and fully **Dockerized**. Runs 100% free on a laptop
 ## Architecture
 
 ```
-Binance WS ─▶ Redpanda ─▶ Spark Structured Streaming ─▶ MinIO (Parquet lake)
+Binance WS ─▶ Redpanda ─▶ Spark Structured Streaming ─▶ SeaweedFS (Parquet lake)
                                                               │
                                        Dagster ──────────────┤
                                           │                   ▼
@@ -40,7 +40,7 @@ Full diagram, data contracts and skill-coverage table: [`docs/architecture.md`](
 |---|---|
 | Ingestion | Python `asyncio`, `websockets`, `confluent-kafka` |
 | Streaming / broker | **Redpanda** (Kafka API), **Spark Structured Streaming** |
-| Storage | **MinIO** (S3-compatible) Parquet lake, **DuckDB** serving DB |
+| Storage | **SeaweedFS** (S3-compatible) Parquet lake, **DuckDB** serving DB |
 | Transformation | **dbt** (staging / intermediate / marts) + data-quality tests |
 | ML | **LightGBM**, scikit-learn, walk-forward CV, **MLflow** |
 | Serving | **FastAPI**, Pydantic |
@@ -76,9 +76,9 @@ Streams **live** Binance trades through the whole pipeline.
 
 ```bash
 cp .env.example .env
-make up           # Redpanda, MinIO, Spark, MLflow, API, dashboard, ingestion
+make up           # Redpanda, SeaweedFS, Spark, MLflow, API, dashboard, ingestion
 make ps           # check services
-# Redpanda Console: http://localhost:8085   MinIO: http://localhost:9001
+# Redpanda Console: http://localhost:8085   SeaweedFS files: http://localhost:8888
 # MLflow: http://localhost:5000             Dashboard: http://localhost:8501
 
 # Build marts + train on the collected data (and schedule retraining):
@@ -94,7 +94,7 @@ make dagster      # http://localhost:3000
   and exponential backoff; normalizes trades and produces to Kafka idempotently.
 - **`streaming/spark_stream.py`** — Spark Structured Streaming with event-time
   watermarking; computes 10s OHLCV, VWAP, and order-flow imbalance; writes Parquet to
-  the MinIO lake with checkpointing.
+  the SeaweedFS lake with checkpointing.
 - **`warehouse/`** — dbt project: typed staging view, rolling technical indicators
   (SMA, volatility, relative volume) in `intermediate`, and two marts — a model-ready
   feature matrix with a forward-looking label, and a per-symbol snapshot. Includes
