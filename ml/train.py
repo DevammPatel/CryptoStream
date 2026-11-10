@@ -20,7 +20,9 @@ try:
     import mlflow
 
     _HAS_MLFLOW = True
-except ImportError:  # MLflow is optional — training still works without it
+except ImportError:  # MLflow is optional, unless a tracking server was requested
+    if os.getenv("MLFLOW_TRACKING_URI"):
+        raise
     mlflow = None
     _HAS_MLFLOW = False
 
