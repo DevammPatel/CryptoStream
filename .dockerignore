@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.env
+data
+mlruns
+docs
+tests
+warehouse/target
+warehouse/logs
+**/__pycache__
+**/.pytest_cache
