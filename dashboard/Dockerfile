@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY requirements.txt .
+COPY dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Build context is the repo root (see docker-compose.yml) so we can pull in the
