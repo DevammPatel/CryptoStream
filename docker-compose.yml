@@ -39,6 +39,20 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:29092
 
+  # Create the trades topic up front: auto-creation would give it one partition.
+  # rpk has no --if-not-exists here, so an existing topic falls through to describe.
+  redpanda-init:
+    image: redpandadata/redpanda:v24.1.7
+    container_name: cs-redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        rpk topic create ${TRADES_TOPIC:-crypto.trades} -p 3 -r 1 -X brokers=redpanda:29092
+        || rpk topic describe ${TRADES_TOPIC:-crypto.trades} -X brokers=redpanda:29092
+
   # ---------------------------------------------------------------------------
   # SeaweedFS — S3-compatible object store used as the raw data lake.
   # `mini` runs every SeaweedFS component in one process and creates the bucket.
@@ -68,8 +82,8 @@ services:
     build: ./ingestion
     container_name: cs-ingestion
     depends_on:
-      redpanda:
-        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
     environment:
       KAFKA_BOOTSTRAP: redpanda:29092
       SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
@@ -83,8 +97,8 @@ services:
     build: ./streaming
     container_name: cs-spark
     depends_on:
-      redpanda:
-        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
       seaweedfs:
         condition: service_healthy
     environment:
