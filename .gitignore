@@ -10,6 +10,7 @@ dist/
 build/
 .DS_Store
 data/
+mlruns/
 warehouse/logs/
 warehouse/target/
 warehouse/.user.yml
