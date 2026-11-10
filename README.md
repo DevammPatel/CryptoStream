@@ -79,7 +79,7 @@ cp .env.example .env
 make up           # Redpanda, SeaweedFS, Spark, MLflow, API, dashboard, ingestion
 make ps           # check services
 # Redpanda Console: http://localhost:8085   SeaweedFS files: http://localhost:8888
-# MLflow: http://localhost:5000             Dashboard: http://localhost:8501
+# MLflow: http://localhost:5001             Dashboard: http://localhost:8501
 
 # Build marts + train on the collected data (and schedule retraining):
 pip install -r requirements.txt
