@@ -8,9 +8,10 @@ generator) into DuckDB's raw schema. dbt then builds staging/marts, the ML asset
 trains + logs to MLflow, and the summary asset produces the LLM market read.
 
 Run the UI:   dagster dev -m cryptostream_dagster.definitions
-"""
-from __future__ import annotations
 
+Dagster inspects the `context` annotation at runtime, so this module must not use
+`from __future__ import annotations`.
+"""
 import glob
 import os
 import subprocess
