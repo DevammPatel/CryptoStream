@@ -96,16 +96,20 @@ def compute_ohlcv(trades):
     """10-second OHLCV + order-flow features per symbol."""
     signed_qty = F.when(F.col("is_buyer_maker"), -F.col("quantity")).otherwise(F.col("quantity"))
     notional = F.col("price") * F.col("quantity")
+    # Trades in a window can arrive in any order across partitions and batches, so open
+    # and close come from the earliest and latest trade time, with the trade id as a
+    # tie-break for trades in the same millisecond. first()/last() only see arrival order.
+    trade_order = F.struct("trade_time", "trade_id")
 
     agg = (
         trades.withColumn("signed_qty", signed_qty)
         .withColumn("notional", notional)
         .groupBy(F.window("event_ts", "10 seconds"), F.col("symbol"))
         .agg(
-            F.first("price", ignorenulls=True).alias("open"),
+            F.min_by("price", trade_order).alias("open"),
             F.max("price").alias("high"),
             F.min("price").alias("low"),
-            F.last("price", ignorenulls=True).alias("close"),
+            F.max_by("price", trade_order).alias("close"),
             F.sum("quantity").alias("volume"),
             F.sum("notional").alias("notional"),
             F.count("*").alias("trade_count"),
