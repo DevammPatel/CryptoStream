@@ -1,4 +1,7 @@
--- Cleaned, typed staging view over the raw 10s bars.
+-- Cleaned, typed staging view over the raw 10s bars: one row per symbol and window.
+-- The same bar can land in the lake twice: Spark replays a batch after a restart, and
+-- the history backfill overlaps bars Spark also wrote. The most complete copy wins.
+-- Keep in sync with one_bar_per_window() in ml/features.py.
 with source as (
     select * from {{ source('raw', 'ohlcv_10s') }}
 ),
@@ -20,6 +23,15 @@ renamed as (
     from source
     -- guard against degenerate bars
     where close > 0 and volume > 0
+),
+
+deduped as (
+    select *
+    from renamed
+    qualify row_number() over (
+        partition by symbol, window_start
+        order by trade_count desc, volume desc
+    ) = 1
 )
 
-select * from renamed
+select * from deduped
