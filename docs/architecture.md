@@ -113,8 +113,9 @@ The model predicts 30 seconds ahead, so its inputs must be fresher than that.
   seconds. The API keeps the last 400 per symbol in memory and the dashboard reads them.
 
 `/predict/{symbol}` uses the newest finished bar from the fast path. The bar still
-forming is skipped because the model never saw a partial bar in training. If the feed
-has fewer than 31 bars or its newest finished bar is over 30 seconds old, the API falls
+forming is skipped because the model never saw a partial bar in training, and a bar
+only counts as finished 5 seconds after it ends, which leaves time for Spark's final
+update. If the feed has fewer than 31 bars or its newest finished bar is over 30 seconds old, the API falls
 back to the warehouse. The `source` field in the response says which one was used.
 
 `ml/live.py` repeats the indicator logic from `int_technical_features.sql` in Python. A

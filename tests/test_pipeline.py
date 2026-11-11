@@ -176,6 +176,7 @@ def test_live_features_match_warehouse(sample_data, tmp_path, monkeypatch):
     from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
     from dagster import materialize
     from features import FEATURE_COLUMNS
+    from live import GRACE_MS
 
     served = tmp_path / "crypto.duckdb"
     monkeypatch.setenv("DUCKDB_PATH", str(served))
@@ -195,7 +196,7 @@ def test_live_features_match_warehouse(sample_data, tmp_path, monkeypatch):
     for bar in bars:
         bar["window_start"] = pd.Timestamp(bar["window_start"]).value // 10**6
         bar["window_end"] = pd.Timestamp(bar["window_end"]).value // 10**6
-    now_ms = max(b["window_end"] for b in bars) + 1
+    now_ms = max(b["window_end"] for b in bars) + GRACE_MS
 
     feats = filled_store(bars).latest_features("btcusdt", now_ms=now_ms)
     for column in FEATURE_COLUMNS:

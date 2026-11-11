@@ -25,6 +25,7 @@ log = logging.getLogger("uvicorn.error")
 MAX_BARS = 400       # per symbol; a little over the hour of bars the topic retains
 MIN_BARS = 31        # the 30-bar window, plus one previous close for the first return
 MAX_AGE_MS = 30_000  # older than the model's 30-second horizon means the feed is stale
+GRACE_MS = 5_000     # Spark updates every 2 seconds, so a bar's last trades land after it ends
 
 
 def with_indicators(bars: pd.DataFrame) -> pd.DataFrame:
@@ -77,7 +78,7 @@ class LiveBars:
         if df is None:
             return None
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-        finished = df[df["window_end"] <= now_ms]
+        finished = df[df["window_end"] + GRACE_MS <= now_ms]
         if len(finished) < MIN_BARS:
             return None
         row = finished.iloc[-1]
