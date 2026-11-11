@@ -7,6 +7,8 @@ Covered:
   - the market summary judges volatility against each symbol's own baseline
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
+  - CV splits never let a training label reach into the test period
+  - on data with no signal, calibrated probabilities stay near the base rate
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
   - indicators and labels are time-based, identical in dbt and Python, across gaps
@@ -188,6 +190,38 @@ def test_training_runs(sample_data, model_dir, tmp_path):
     assert result.returncode == 0, result.stderr
     assert os.path.exists(os.path.join(model_dir, "direction_lgbm.pkl"))
     assert os.path.exists(os.path.join(model_dir, "model_meta.json"))
+
+
+def test_purged_splits_never_leak():
+    import numpy as np
+    from train import HORIZON_NS, purged_splits
+
+    # two symbols sharing one clock of 10s bars
+    t = np.repeat(np.arange(0, 2000) * 10 * 10**9, 2)
+    folds = list(purged_splits(t))
+    assert len(folds) == 5
+    for train, test in folds:
+        assert t[train].max() + HORIZON_NS < t[test].min()
+
+
+def test_epoch_ns_is_nanoseconds_whatever_the_input_unit():
+    import pandas as pd
+    from train import epoch_ns
+
+    for unit in ("us", "ns"):
+        times = pd.Series(pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 00:00:30"]).as_unit(unit))
+        assert int(epoch_ns(times)[1] - epoch_ns(times)[0]) == 30 * 10**9
+
+
+def test_calibrated_model_claims_no_edge_on_noise(sample_data, model_dir):
+    import json
+
+    meta = json.load(open(os.path.join(model_dir, "model_meta.json")))
+    metrics = meta["metrics"]
+    assert metrics["calibrated"] is True
+    # the sample data is a random walk: an honest model stays close to 50/50
+    assert metrics["test_prob_std"] < 0.1
+    assert metrics["test_brier"] < metrics["test_brier_baseline"] + 0.01
 
 
 def test_prediction_from_model(sample_data, model_dir):

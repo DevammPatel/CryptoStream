@@ -102,8 +102,9 @@ make ps           # check services
   (SMA, volatility, relative volume) in `intermediate`, and two marts — a model-ready
   feature matrix with a forward-looking label, and a per-symbol snapshot. Includes
   generic + singular data tests.
-- **`ml/train.py`** — LightGBM classifier with `TimeSeriesSplit` walk-forward CV (no
-  look-ahead leakage), logs params/metrics/feature-importance/model to MLflow.
+- **`ml/train.py`** — LightGBM classifier with walk-forward CV, purged so no training
+  label reaches into the test period, and probabilities calibrated on held-out data;
+  logs params, metrics against simple baselines, feature importance and the model to MLflow.
 - **`ml/api/main.py`** — FastAPI service that hot-reloads the latest model and exposes
   `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`, `/health`.
 - **`ml/live.py`** — keeps recent bars from Kafka in memory and computes the same

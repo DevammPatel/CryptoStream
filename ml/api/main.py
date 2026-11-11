@@ -89,9 +89,9 @@ class Features(BaseModel):
 
 
 class Prediction(BaseModel):
-    prob_up: float
+    prob_up: float                # calibrated: how often "up" happened at this score
     direction: str
-    confidence: float
+    confidence: float             # distance of prob_up from 50/50, scaled to 0-1
     source: str = "request"       # request, live or warehouse
     as_of: str | None = None      # start of the bar the features came from
 
