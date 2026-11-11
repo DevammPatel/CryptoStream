@@ -112,9 +112,11 @@ async def stream_forever() -> None:
     try:
         while True:
             try:
-                # close_timeout bounds the goodbye handshake so `docker stop` (10 s) never
-                # kills the process before the flush below.
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=2) as ws:
+                # Closing waits up to close_timeout at each of up to five steps, and
+                # Binance usually leaves the goodbye unanswered. With 1 s, closing plus the
+                # 5 s flush below always fits in the 20 s stop_grace_period in
+                # docker-compose.yml.
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=1) as ws:
                     log.info("connected to %s", url.split("/stream")[0])
                     backoff = 1  # reset after a successful connect
                     async for message in ws:
