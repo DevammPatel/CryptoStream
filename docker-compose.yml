@@ -125,6 +125,35 @@ services:
       - mlflow-data:/mlflow
 
   # ---------------------------------------------------------------------------
+  # Dagster — scheduled batch layer: lake -> dbt -> model -> summary
+  # ---------------------------------------------------------------------------
+  dagster:
+    build:
+      context: .
+      dockerfile: orchestration/Dockerfile
+    container_name: cs-dagster
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      LAKE_URI: s3://${LAKE_BUCKET:-crypto-lake}/features/ohlcv_10s
+      LAKE_ENDPOINT: http://seaweedfs:8333
+      LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:-lakeadmin}
+      LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:-lakeadmin}
+      DUCKDB_PATH: /data/warehouse/crypto.duckdb
+      MODEL_DIR: /models
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "3000:3000"
+    volumes:
+      - warehouse-data:/data
+      - models-data:/models
+      - dagster-data:/opt/dagster
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # FastAPI — model serving
   # ---------------------------------------------------------------------------
   api:
@@ -134,11 +163,13 @@ services:
       - mlflow
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      LAKE_ROOT: /data/warehouse
+      DUCKDB_PATH: /data/warehouse/crypto.duckdb
+      MODEL_DIR: /models
     ports:
       - "8000:8000"
     volumes:
       - warehouse-data:/data
+      - models-data:/models
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -153,7 +184,7 @@ services:
       - api
     environment:
       API_URL: http://api:8000
-      LAKE_ROOT: /data/warehouse
+      DUCKDB_PATH: /data/warehouse/crypto.duckdb
     ports:
       - "8501:8501"
     volumes:
@@ -164,3 +195,5 @@ volumes:
   lake-data:
   mlflow-data:
   warehouse-data:
+  models-data:
+  dagster-data:

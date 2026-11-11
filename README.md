@@ -76,14 +76,15 @@ Streams **live** Binance trades through the whole pipeline.
 
 ```bash
 cp .env.example .env
-make up           # Redpanda, SeaweedFS, Spark, MLflow, API, dashboard, ingestion
+make up           # Redpanda, SeaweedFS, Spark, Dagster, MLflow, API, dashboard, ingestion
 make ps           # check services
 # Redpanda Console: http://localhost:8085   SeaweedFS files: http://localhost:8888
 # MLflow: http://localhost:5001             Dashboard: http://localhost:8501
+# Dagster: http://localhost:3000
 
-# Build marts + train on the collected data (and schedule retraining):
-pip install -r requirements.txt
-make dagster      # http://localhost:3000
+# Every 15 minutes Dagster builds the marts and retrains on the collected data.
+# Early runs fail until there is enough data: the dashboard fills in after the first
+# run that finds bars, and predictions start at about 200 rows (15 to 30 minutes).
 ```
 
 ---

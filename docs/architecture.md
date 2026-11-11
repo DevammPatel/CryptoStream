@@ -83,6 +83,18 @@ bars / ~30s ahead is higher than the current close).
 
 1. **Offline demo (fastest, no Docker/network):** `make seed` generates realistic
    synthetic bars → `make dbt` → `make train` → `make api` + `make dashboard`.
-2. **Full live stack:** `make up` starts Redpanda, SeaweedFS, Spark, MLflow, the API and
-   dashboard in Docker; the ingestion service streams live Binance trades. Run the
-   Dagster batch layer (`dagster dev`) to build marts + retrain on a schedule.
+2. **Full live stack:** `make up` starts Redpanda, SeaweedFS, Spark, Dagster, MLflow, the
+   API and dashboard in Docker; the ingestion service streams live Binance trades.
+   Dagster builds marts + retrains on a 15-minute schedule.
+
+## Shared storage in Docker
+
+| Volume | Written by | Read by |
+|---|---|---|
+| `lake-data` | Spark, through the S3 API | Dagster, through the S3 API |
+| `warehouse-data` (DuckDB file) | Dagster | API, dashboard |
+| `models-data` | Dagster | API |
+
+DuckDB locks a file against other processes, so Dagster never writes the served file.
+It builds a copy in `.build/` and renames it over the served file after dbt's tests
+pass. A failed build leaves the last good warehouse in place.
