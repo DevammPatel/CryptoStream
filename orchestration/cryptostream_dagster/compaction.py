@@ -46,7 +46,12 @@ def datasets(features_uri: str) -> list[Dataset]:
 
 
 def filesystem(uri: str):
-    """An fsspec filesystem for the lake: local folders, or S3 with the LAKE_* settings."""
+    """An fsspec filesystem for the lake: local folders, or S3 with the LAKE_* settings.
+
+    s3fs normally caches folder listings, but DuckDB writes the merged files behind its
+    back, so a cached listing would say a file just written does not exist. The cache is
+    off, and so is fsspec's reuse of filesystem objects, which would carry it between runs.
+    """
     import fsspec
 
     if uri.startswith("s3://"):
@@ -55,6 +60,8 @@ def filesystem(uri: str):
             key=os.environ["LAKE_ACCESS_KEY"],
             secret=os.environ["LAKE_SECRET_KEY"],
             client_kwargs={"endpoint_url": os.environ["LAKE_ENDPOINT"]},
+            use_listings_cache=False,
+            skip_instance_cache=True,
         )
     return fsspec.filesystem("file")
 
@@ -72,7 +79,6 @@ def compact(con: duckdb.DuckDBPyConnection, fs, ds: Dataset, now: datetime) -> d
     """Merge each settled hour's Spark files into one file per symbol."""
     stats = {"merged_files": 0, "written_files": 0}
     cutoff = (now - SETTLE).replace(tzinfo=None)
-    fs.invalidate_cache()
     for partition in fs.glob(f"{ds.path}/symbol=*"):
         files = [_full(ds.path, f) for f in fs.glob(f"{partition}/part-*.parquet")]
         if not files:
@@ -112,7 +118,6 @@ def compact(con: duckdb.DuckDBPyConnection, fs, ds: Dataset, now: datetime) -> d
 def expire(fs, ds: Dataset, now: datetime, days: float) -> int:
     """Delete compacted hours older than `days`. Returns how many files were removed."""
     oldest = (now - timedelta(days=days)).replace(tzinfo=None)
-    fs.invalidate_cache()
     old = []
     for f in fs.glob(f"{ds.path}/symbol=*/compact-*.parquet"):
         match = re.search(r"compact-(\d{10})\.parquet$", f)

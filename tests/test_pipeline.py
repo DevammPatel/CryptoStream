@@ -16,6 +16,7 @@ Covered:
   - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
   - bar times stay UTC whatever the time zone of the machine reading them
   - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
+  - compaction re-lists S3 instead of trusting a cached listing
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
 
@@ -480,6 +481,21 @@ def test_compaction_merges_finished_hours_and_expires_old_trades(tmp_path):
     trade_files = sorted(p.name for p in trades.iterdir())
     assert trade_files == ["compact-2026111113.parquet"]
     con.close()
+
+
+def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):
+    """DuckDB writes the merged file straight to S3, so s3fs must list the bucket again
+    to find it. A cached listing made the move fail with FileNotFoundError."""
+    from cryptostream_dagster.compaction import filesystem
+
+    monkeypatch.setenv("LAKE_ACCESS_KEY", "test")
+    monkeypatch.setenv("LAKE_SECRET_KEY", "test")
+    monkeypatch.setenv("LAKE_ENDPOINT", "http://localhost:1")
+    uri = "s3://crypto-lake/features/ohlcv_10s"
+    fs = filesystem(uri)
+    fs.dircache["crypto-lake/features"] = [{"name": "crypto-lake/features/a", "size": 0, "type": "file"}]
+    assert "crypto-lake/features" not in fs.dircache
+    assert filesystem(uri) is not fs  # no shared instance carrying state between runs
 
 
 def make_bars(n, end_ms, symbol="btcusdt"):
