@@ -41,9 +41,10 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:29092
 
-  # Create the topics up front: auto-creation would give them one partition.
+  # Create the topics up front: auto-creation would give one partition and no retention limit.
   # rpk has no --if-not-exists here, so an existing topic falls through to describe.
-  # Live bars keep one hour, which is what the API replays to rebuild after a restart.
+  # Trades keep one day. Live bars keep one hour, which is what the API replays to
+  # rebuild after a restart.
   redpanda-init:
     image: redpandadata/redpanda:v24.1.7
     container_name: cs-redpanda-init
@@ -53,7 +54,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
-        (rpk topic create ${TRADES_TOPIC:-crypto.trades} -p 3 -r 1 -X brokers=redpanda:29092
+        (rpk topic create ${TRADES_TOPIC:-crypto.trades} -p 3 -r 1 -c retention.ms=86400000 -X brokers=redpanda:29092
         || rpk topic describe ${TRADES_TOPIC:-crypto.trades} -X brokers=redpanda:29092)
         && (rpk topic create ${BARS_TOPIC:-crypto.bars_10s} -p 3 -r 1 -c retention.ms=3600000 -X brokers=redpanda:29092
         || rpk topic describe ${BARS_TOPIC:-crypto.bars_10s} -X brokers=redpanda:29092)
