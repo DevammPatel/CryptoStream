@@ -124,9 +124,12 @@ def main() -> None:
     else:
         print("  (mlflow not installed — skipping experiment logging)")
 
-    joblib.dump({"model": model, "features": FEATURE_COLUMNS}, MODEL_PATH)
-    with open(META_PATH, "w") as fh:
+    # Write then rename, so the API can never load a half-written file.
+    joblib.dump({"model": model, "features": FEATURE_COLUMNS}, f"{MODEL_PATH}.tmp")
+    os.replace(f"{MODEL_PATH}.tmp", MODEL_PATH)
+    with open(f"{META_PATH}.tmp", "w") as fh:
         json.dump({"metrics": metrics, "feature_importance": importance, "mlflow_run_id": run_id}, fh, indent=2)
+    os.replace(f"{META_PATH}.tmp", META_PATH)
 
     print("=== Training complete ===")
     for k, v in metrics.items():
