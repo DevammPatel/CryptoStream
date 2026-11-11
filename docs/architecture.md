@@ -73,6 +73,20 @@ flowchart LR
 }
 ```
 
+**Kafka topic `crypto.bars_10s`** (one JSON message per update, keyed by symbol, kept
+for one hour). The same bar arrives many times while it forms; the newest copy wins.
+
+```json
+{
+  "symbol": "btcusdt",
+  "window_start": 1700000000000,
+  "window_end": 1700000010000,
+  "open": 62000.5, "high": 62010.0, "low": 61995.0, "close": 62005.0,
+  "volume": 1.25, "vwap": 62003.1, "trade_count": 42,
+  "net_signed_volume": 0.3, "order_flow_imbalance": 0.24
+}
+```
+
 **Feature table `features/ohlcv_10s`** (10-second bars per symbol): open, high, low,
 close, volume, vwap, trade_count, net_signed_volume, order_flow_imbalance.
 

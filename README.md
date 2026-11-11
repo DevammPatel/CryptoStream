@@ -95,7 +95,8 @@ make ps           # check services
   and exponential backoff; normalizes trades and produces to Kafka idempotently.
 - **`streaming/spark_stream.py`** — Spark Structured Streaming with event-time
   watermarking; computes 10s OHLCV, VWAP, and order-flow imbalance; writes Parquet to
-  the SeaweedFS lake with checkpointing.
+  the SeaweedFS lake with checkpointing, and publishes bars to Kafka every 2 seconds
+  for the live view.
 - **`warehouse/`** — dbt project: typed staging view, rolling technical indicators
   (SMA, volatility, relative volume) in `intermediate`, and two marts — a model-ready
   feature matrix with a forward-looking label, and a per-symbol snapshot. Includes

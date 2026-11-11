@@ -37,8 +37,9 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:29092
 
-  # Create the trades topic up front: auto-creation would give it one partition.
+  # Create the topics up front: auto-creation would give them one partition.
   # rpk has no --if-not-exists here, so an existing topic falls through to describe.
+  # Live bars keep one hour, which is what the API replays to rebuild after a restart.
   redpanda-init:
     image: redpandadata/redpanda:v24.1.7
     container_name: cs-redpanda-init
@@ -48,8 +49,10 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
-        rpk topic create ${TRADES_TOPIC:-crypto.trades} -p 3 -r 1 -X brokers=redpanda:29092
-        || rpk topic describe ${TRADES_TOPIC:-crypto.trades} -X brokers=redpanda:29092
+        (rpk topic create ${TRADES_TOPIC:-crypto.trades} -p 3 -r 1 -X brokers=redpanda:29092
+        || rpk topic describe ${TRADES_TOPIC:-crypto.trades} -X brokers=redpanda:29092)
+        && (rpk topic create ${BARS_TOPIC:-crypto.bars_10s} -p 3 -r 1 -c retention.ms=3600000 -X brokers=redpanda:29092
+        || rpk topic describe ${BARS_TOPIC:-crypto.bars_10s} -X brokers=redpanda:29092)
 
   # ---------------------------------------------------------------------------
   # SeaweedFS — S3-compatible object store used as the raw data lake.
@@ -102,6 +105,7 @@ services:
     environment:
       KAFKA_BOOTSTRAP: redpanda:29092
       TRADES_TOPIC: ${TRADES_TOPIC:-crypto.trades}
+      BARS_TOPIC: ${BARS_TOPIC:-crypto.bars_10s}
       LAKE_ENDPOINT: http://seaweedfs:8333
       LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:-lakeadmin}
       LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:-lakeadmin}

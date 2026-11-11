@@ -3,9 +3,14 @@
 Reads the raw trade stream from Redpanda, computes windowed OHLCV + micro-structure
 features per symbol, and writes them as Parquet to the S3-compatible SeaweedFS lake.
 
-Two sinks:
+Three sinks:
   1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, exactly-once via checkpoint)
-  2. 10s OHLCV features   -> s3a://<bucket>/features/ohlcv_10s/     (append)
+  2. 10s OHLCV features  -> s3a://<bucket>/features/ohlcv_10s/    (append)
+  3. Live bars           -> Kafka topic crypto.bars_10s           (update, every 2 seconds)
+
+Append only writes a bar once the watermark passes it, so the lake is complete but
+about a minute behind. Update publishes each bar while it is still forming, which is
+what the API and dashboard read for the live view.
 
 Run inside the `spark` container (see streaming/Dockerfile), which supplies the
 Kafka + Hadoop-AWS jars. Configure via env vars (see docker-compose.yml).
@@ -27,6 +32,7 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "redpanda:29092")
 TRADES_TOPIC = os.getenv("TRADES_TOPIC", "crypto.trades")
+BARS_TOPIC = os.getenv("BARS_TOPIC", "crypto.bars_10s")
 LAKE_ENDPOINT = os.getenv("LAKE_ENDPOINT", "http://seaweedfs:8333")
 LAKE_ACCESS_KEY = os.getenv("LAKE_ACCESS_KEY", "lakeadmin")
 LAKE_SECRET_KEY = os.getenv("LAKE_SECRET_KEY", "lakeadmin")
@@ -125,6 +131,29 @@ def compute_ohlcv(trades):
     return agg
 
 
+def bars_to_kafka(features):
+    """Kafka records for the live view: keyed by symbol, times in epoch milliseconds."""
+    return features.select(
+        F.col("symbol").alias("key"),
+        F.to_json(
+            F.struct(
+                "symbol",
+                (F.col("window_start").cast("long") * 1000).alias("window_start"),
+                (F.col("window_end").cast("long") * 1000).alias("window_end"),
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "vwap",
+                "trade_count",
+                "net_signed_volume",
+                "order_flow_imbalance",
+            )
+        ).alias("value"),
+    )
+
+
 def main() -> None:
     spark = build_spark()
     trades = read_trades(spark)
@@ -147,6 +176,17 @@ def main() -> None:
         .partitionBy("symbol")
         .outputMode("append")
         .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    (
+        bars_to_kafka(features)
+        .writeStream.format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("topic", BARS_TOPIC)
+        .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/bars_live/")
+        .outputMode("update")
+        .trigger(processingTime="2 seconds")
         .start()
     )
 
