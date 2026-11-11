@@ -1,7 +1,10 @@
 """Dagster orchestration for the CryptoStream batch layer.
 
 Assets (DAG):
-    lake_to_duckdb  ->  dbt_models  ->  ml_model  ->  market_summary
+    compact_lake  ->  lake_to_duckdb  ->  dbt_models  ->  ml_model  ->  market_summary
+
+`compact_lake` merges each finished hour of Spark's small files and expires old raw
+trades (see compaction.py).
 
 `lake_to_duckdb` loads the Parquet feature lake (written by Spark, or by the sample
 generator) into a fresh build copy of the warehouse. dbt builds staging/marts in that
@@ -38,6 +41,8 @@ from dagster import (
     asset,
     define_asset_job,
 )
+
+from cryptostream_dagster import compaction
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WAREHOUSE_DIR = os.path.join(REPO, "warehouse")
@@ -86,7 +91,19 @@ def publish_warehouse() -> None:
     os.replace(build, served_path())
 
 
-@asset(description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
+@asset(description="Merge each finished hour of Spark's small lake files, and expire old raw trades.")
+def compact_lake(context: AssetExecutionContext) -> MaterializeResult:
+    con = duckdb.connect()
+    try:
+        connect_lake_storage(con)
+        summary = compaction.compact_lake(con, lake_uri())
+    finally:
+        con.close()
+    context.log.info("compaction: %s", summary)
+    return MaterializeResult(metadata={"summary": MetadataValue.json(summary)})
+
+
+@asset(deps=[compact_lake], description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
 def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
     build = build_path()
     os.makedirs(os.path.dirname(build), exist_ok=True)
@@ -180,7 +197,7 @@ refresh_schedule = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[lake_to_duckdb, dbt_models, ml_model, market_summary],
+    assets=[compact_lake, lake_to_duckdb, dbt_models, ml_model, market_summary],
     jobs=[refresh_job],
     schedules=[refresh_schedule],
 )

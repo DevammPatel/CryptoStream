@@ -121,8 +121,8 @@ make backfill     # optional: load 7 days of real history (about 3 minutes) so t
   indicators as dbt, so predictions use data seconds old, not the 15-minute warehouse.
 - **`llm/market_agent.py`** — turns the latest snapshot + model signal into a plain-
   English market read; works offline, upgrades to an LLM narrative if a key is set.
-- **`orchestration/`** — Dagster asset DAG (`lake → dbt → model → summary`) with a
-  15-minute refresh schedule.
+- **`orchestration/`** — Dagster asset DAG (`compact lake → load → dbt → model →
+  summary`) with a 15-minute refresh schedule, plus the Binance history backfill.
 - **`dashboard/app.py`** — Streamlit: candlesticks + VWAP, indicators, live model call,
   and the market summary. Refreshes itself every 5 seconds.
 

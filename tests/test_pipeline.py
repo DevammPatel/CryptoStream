@@ -15,6 +15,7 @@ Covered:
   - duplicate copies of a bar collapse to the most complete one
   - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
   - bar times stay UTC whatever the time zone of the machine reading them
+  - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
 
@@ -414,6 +415,71 @@ def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):
     con.close()
     assert str(first) == "2026-07-01 12:00:00"
     assert str(last) == "2026-07-01 12:16:30"
+
+
+def spark_lake(tmp_path, now):
+    """Spark-shaped files: a file per minute of bars over the last 3 hours, a duplicate
+    partial copy of some bars, and raw trades from 9 days ago and from now."""
+    import pandas as pd
+
+    root = tmp_path / "lake"
+    feats = root / "features" / "ohlcv_10s" / "symbol=btcusdt"
+    trades = root / "raw" / "trades" / "symbol=btcusdt"
+    feats.mkdir(parents=True)
+    trades.mkdir(parents=True)
+    start = pd.Timestamp(now).tz_localize(None).floor("h") - pd.Timedelta(hours=2)
+    bars = pd.DataFrame({"window_start": pd.date_range(start, now.replace(tzinfo=None), freq="10s", inclusive="left")})
+    bars["window_end"] = bars["window_start"] + pd.Timedelta(seconds=10)
+    bars = bars.assign(open=1.0, high=1.0, low=1.0, close=1.0, volume=2.0, vwap=1.0, trade_count=10,
+                       net_signed_volume=0.0, order_flow_imbalance=0.0)
+    for i, (_, minute) in enumerate(bars.groupby(bars["window_start"].dt.floor("min"))):
+        minute.to_parquet(feats / f"part-{i:05d}.parquet", index=False)
+    bars.iloc[:30].assign(trade_count=4, close=9.0).to_parquet(feats / "part-replay.parquet", index=False)
+    pd.DataFrame({"x": [1]}).to_parquet(feats / "backfill-2026-01-01.parquet", index=False)
+    for name, when in (("old", pd.Timestamp(now).tz_localize(None) - pd.Timedelta(days=9)), ("new", start)):
+        pd.DataFrame({"trade_id": [1, 2], "price": [1.0, 1.0], "quantity": [1.0, 1.0], "trade_time": [0, 0],
+                      "is_buyer_maker": [False, True], "ingest_time": [0, 0], "event_ts": [when, when]}
+                     ).to_parquet(trades / f"part-{name}.parquet", index=False)
+    return root, feats, trades, bars
+
+
+def test_compaction_merges_finished_hours_and_expires_old_trades(tmp_path):
+    from datetime import datetime, timezone
+
+    import duckdb
+    from cryptostream_dagster.compaction import compact_lake
+
+    now = datetime(2026, 11, 11, 15, 25, tzinfo=timezone.utc)
+    root, feats, trades, bars = spark_lake(tmp_path, now)
+    uri = str(root / "features" / "ohlcv_10s")
+    con = duckdb.connect()
+    summary = compact_lake(con, uri, now=now)
+
+    names = sorted(p.name for p in feats.iterdir())
+    assert "compact-2026111113.parquet" in names and "compact-2026111114.parquet" in names
+    assert "backfill-2026-01-01.parquet" in names               # not Spark's, left alone
+    open_hour = [n for n in names if n.startswith("part-")]
+    assert len(open_hour) == 25                                  # 15:00-15:25 is still being written
+    assert summary[uri]["written_files"] == 2
+
+    lake = con.execute(  # compact-* and part-* files, not the backfill file
+        f"select * from read_parquet('{feats}/[cp][oa]*.parquet', union_by_name=true, hive_partitioning=false)"
+    ).df()
+    assert len(lake) == len(bars)                                # every bar once, nothing lost
+    assert lake["window_start"].is_unique
+    assert (lake["trade_count"] == 10).all()                     # the complete copy won over the replay
+
+    # A late file for a finished hour is folded into that hour's compact file.
+    bars.iloc[[5]].assign(trade_count=11).to_parquet(feats / "part-late.parquet", index=False)
+    compact_lake(con, uri, now=now)
+    first_hour = con.execute(f"select trade_count from read_parquet('{feats}/compact-2026111113.parquet') order by window_start").df()
+    assert len(first_hour) == 360 and first_hour["trade_count"].iloc[5] == 11
+    assert not (feats / "part-late.parquet").exists()
+
+    # Raw trades: the 9-day-old hour is past the 7-day retention and is gone.
+    trade_files = sorted(p.name for p in trades.iterdir())
+    assert trade_files == ["compact-2026111113.parquet"]
+    con.close()
 
 
 def make_bars(n, end_ms, symbol="btcusdt"):
