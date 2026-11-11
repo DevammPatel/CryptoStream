@@ -165,11 +165,16 @@ services:
     build: ./ml
     container_name: cs-api
     depends_on:
-      - mlflow
+      redpanda-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_started
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       DUCKDB_PATH: /data/warehouse/crypto.duckdb
       MODEL_DIR: /models
+      KAFKA_BOOTSTRAP: redpanda:29092
+      BARS_TOPIC: ${BARS_TOPIC:-crypto.bars_10s}
     ports:
       - "8000:8000"
     volumes:

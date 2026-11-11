@@ -8,6 +8,7 @@ Covered:
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
+  - API: predictions from live bars, warehouse fallback, /bars
 
 Run:  pytest -q
 """
@@ -252,3 +253,41 @@ def test_consumer_reads_bars_from_kafka():
 
     assert not thread.is_alive()
     assert len(store.frame("btcusdt")) == 3
+
+
+@pytest.fixture
+def api(sample_data, model_dir, monkeypatch):
+    from fastapi.testclient import TestClient
+    from live import LiveBars
+
+    from ml.api import main
+
+    monkeypatch.setattr(main, "MODEL_PATH", os.path.join(model_dir, "direction_lgbm.pkl"))
+    monkeypatch.setattr(main, "live_bars", LiveBars())
+    monkeypatch.setitem(main._state, "mtime", None)
+    return main, TestClient(main.app)
+
+
+def test_api_predicts_from_live_bars(api):
+    import time
+
+    main, client = api
+    for bar in make_bars(40, int(time.time() * 1000) - 2_000):
+        main.live_bars.update(bar)
+
+    body = client.get("/predict/btcusdt").json()
+    assert body["source"] == "live"
+    assert body["as_of"]
+
+    assert client.get("/symbols").json() == {"symbols": ["btcusdt"]}
+    rows = client.get("/bars/btcusdt?limit=5").json()
+    assert len(rows) == 5
+    assert rows[-1]["rel_volume"] > 0
+    assert client.get("/bars/dogeusdt").status_code == 404
+
+
+def test_api_falls_back_to_warehouse(api):
+    main, client = api
+    body = client.get("/predict/btcusdt").json()
+    assert body["source"] == "warehouse"
+    assert client.get("/predict/dogeusdt").status_code == 404

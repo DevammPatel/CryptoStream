@@ -17,6 +17,7 @@ orchestrated by **Dagster** and fully **Dockerized**. Runs 100% free on a laptop
 ## Architecture
 
 ```
+                                    ┌─▶ Kafka live bars ─▶ FastAPI + dashboard (seconds)
 Binance WS ─▶ Redpanda ─▶ Spark Structured Streaming ─▶ SeaweedFS (Parquet lake)
                                                               │
                                        Dagster ──────────────┤
@@ -104,7 +105,9 @@ make ps           # check services
 - **`ml/train.py`** — LightGBM classifier with `TimeSeriesSplit` walk-forward CV (no
   look-ahead leakage), logs params/metrics/feature-importance/model to MLflow.
 - **`ml/api/main.py`** — FastAPI service that hot-reloads the latest model and exposes
-  `/predict`, `/predict/{symbol}`, `/model/info`, `/health`.
+  `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`, `/health`.
+- **`ml/live.py`** — keeps recent bars from Kafka in memory and computes the same
+  indicators as dbt, so predictions use data seconds old, not the 15-minute warehouse.
 - **`llm/market_agent.py`** — turns the latest snapshot + model signal into a plain-
   English market read; works offline, upgrades to an LLM narrative if a key is set.
 - **`orchestration/`** — Dagster asset DAG (`lake → dbt → model → summary`) with a
@@ -118,7 +121,8 @@ make ps           # check services
 
 ```bash
 curl -s localhost:8000/predict/btcusdt
-# {"prob_up": 0.75, "direction": "up", "confidence": 0.51}
+# {"prob_up": 0.75, "direction": "up", "confidence": 0.51,
+#  "source": "live", "as_of": "2026-01-01T12:00:00+00:00"}
 
 curl -s -X POST localhost:8000/predict \
   -H 'content-type: application/json' \

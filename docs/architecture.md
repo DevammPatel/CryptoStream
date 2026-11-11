@@ -36,6 +36,8 @@ flowchart LR
     end
 
     B --> P --> RP --> SP --> LAKE
+    SP --> BARS[(Redpanda\nKafka topic:\ncrypto.bars_10s)]
+    BARS --> API
     LAKE --> DAG
     DAG --> DBT --> DUCK
     DUCK --> TRAIN --> MLF
@@ -100,6 +102,23 @@ bars / ~30s ahead is higher than the current close).
 2. **Full live stack:** `make up` starts Redpanda, SeaweedFS, Spark, Dagster, MLflow, the
    API and dashboard in Docker; the ingestion service streams live Binance trades.
    Dagster builds marts + retrains on a 15-minute schedule.
+
+## Fast path and slow path
+
+The model predicts 30 seconds ahead, so its inputs must be fresher than that.
+
+- **Slow path (complete, for training):** Spark appends finished bars to the lake, and
+  Dagster rebuilds the warehouse and retrains every 15 minutes.
+- **Fast path (recent, for serving):** Spark publishes bars to `crypto.bars_10s` every 2
+  seconds. The API keeps the last 400 per symbol in memory and the dashboard reads them.
+
+`/predict/{symbol}` uses the newest finished bar from the fast path. The bar still
+forming is skipped because the model never saw a partial bar in training. If the feed
+has fewer than 31 bars or its newest finished bar is over 30 seconds old, the API falls
+back to the warehouse. The `source` field in the response says which one was used.
+
+`ml/live.py` repeats the indicator logic from `int_technical_features.sql` in Python. A
+test compares the two, so a change to one fails until the other matches.
 
 ## Shared storage in Docker
 
