@@ -9,6 +9,8 @@ Covered:
   - model training produces a usable classifier and metadata
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - indicators and labels are time-based, identical in dbt and Python, across gaps
+  - duplicate copies of a bar collapse to the most complete one
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
 
@@ -229,6 +231,68 @@ def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypat
     assert con.execute("select count(*) from intermediate.int_technical_features").fetchone()[0] > 0
     assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
     con.close()
+
+
+def lake_with_gaps(tmp_path):
+    """The btcusdt sample bars with a 50s outage, every 17th bar missing, and a few bars
+    written twice: a partial copy, as Spark leaves when it replays a batch."""
+    import glob
+
+    import numpy as np
+    import pandas as pd
+
+    files = glob.glob(os.path.join(REPO, "data", "lake", "features", "ohlcv_10s", "symbol=btcusdt", "*.parquet"))
+    bars = pd.concat([pd.read_parquet(f) for f in files]).sort_values("window_start").reset_index(drop=True)
+    keep = np.ones(len(bars), dtype=bool)
+    keep[100:105] = False
+    keep[::17] = False
+    lake = tmp_path / "lake"
+    (lake / "symbol=btcusdt").mkdir(parents=True)
+    bars[keep].to_parquet(lake / "symbol=btcusdt" / "part-0.parquet", index=False)
+    partial = bars[keep].iloc[200:210].assign(trade_count=lambda d: d["trade_count"] - 5, close=lambda d: d["close"] * 1.01)
+    partial.to_parquet(lake / "symbol=btcusdt" / "part-1.parquet", index=False)
+    return str(lake)
+
+
+def test_indicators_and_labels_match_dbt_across_gaps(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    import numpy as np
+    import pandas as pd
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+    from features import FEATURE_COLUMNS, _build_from_raw, one_bar_per_window, with_indicators
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("LAKE_URI", lake_with_gaps(tmp_path))
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    con = duckdb.connect(str(served), read_only=True)
+    raw = con.execute("select * from raw.ohlcv_10s").df()
+    sql = con.execute("select * from intermediate.int_technical_features order by window_start").df()
+    mart = con.execute("select * from marts.mart_ml_features order by window_start").df()
+    fallback = _build_from_raw(con).sort_values("window_start").reset_index(drop=True)
+    con.close()
+
+    assert raw.duplicated(["symbol", "window_start"]).sum() == 10
+    assert not sql.duplicated(["symbol", "window_start"]).any()
+    copies = raw[raw.duplicated(["symbol", "window_start"], keep=False)]
+    partial = copies.sort_values("trade_count").drop_duplicates("window_start")
+    assert not sql["close"].isin(partial["close"]).any()  # the complete copy won
+    py = with_indicators(one_bar_per_window(raw))
+    assert len(py) == len(sql)
+    for column in FEATURE_COLUMNS:
+        np.testing.assert_allclose(py[column], sql[column], rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=column)
+
+    # A gap breaks the return instead of comparing prices on either side of it.
+    after_gap = sql["window_start"].diff() > pd.Timedelta(seconds=10)
+    assert after_gap.sum() > 5
+    assert sql.loc[after_gap, "ret_1"].isna().all()
+
+    # Labels only come from the bar exactly 30s later, in dbt and in the Python fallback.
+    assert mart["window_start"].add(pd.Timedelta(seconds=30)).isin(set(sql["window_start"])).all()
+    assert len(fallback) == len(mart)
+    assert (fallback["label_up_3"].to_numpy() == mart["label_up_3"].to_numpy()).all()
 
 
 def make_bars(n, end_ms, symbol="btcusdt"):

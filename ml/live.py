@@ -3,7 +3,8 @@
 Spark publishes every 10s bar to Kafka while the bar is still forming, so one bar
 arrives many times and the newest copy wins. The warehouse only refreshes every 15
 minutes, which is too slow for a 30-second prediction, so the API keeps the recent
-bars here and computes the same indicators dbt computes.
+bars here and computes the same indicators dbt computes (with_indicators in
+features.py).
 
 On startup the consumer replays the whole topic (one hour of retention), which
 rebuilds the rolling windows after a restart.
@@ -16,9 +17,8 @@ import threading
 import time
 import uuid
 
-import numpy as np
 import pandas as pd
-from features import FEATURE_COLUMNS
+from features import FEATURE_COLUMNS, with_indicators
 
 log = logging.getLogger("uvicorn.error")
 
@@ -26,20 +26,6 @@ MAX_BARS = 400       # per symbol; a little over the hour of bars the topic reta
 MIN_BARS = 31        # the 30-bar window, plus one previous close for the first return
 MAX_AGE_MS = 30_000  # older than the model's 30-second horizon means the feed is stale
 GRACE_MS = 5_000     # Spark updates every 2 seconds, so a bar's last trades land after it ends
-
-
-def with_indicators(bars: pd.DataFrame) -> pd.DataFrame:
-    """Keep in sync with warehouse/models/intermediate/int_technical_features.sql."""
-    df = bars[(bars["close"] > 0) & (bars["volume"] > 0)].sort_values("window_start").reset_index(drop=True)
-    previous = df["close"].shift(1)
-    df["ret_1"] = df["close"] / previous - 1
-    df["log_ret_1"] = np.log(df["close"] / previous)
-    sma_30 = df["close"].rolling(30, min_periods=1).mean()
-    df["px_vs_sma30"] = df["close"] / sma_30 - 1
-    df["volatility_30"] = df["log_ret_1"].rolling(30, min_periods=2).std(ddof=1)
-    df["ofi_6"] = df["order_flow_imbalance"].rolling(6, min_periods=1).mean()
-    df["rel_volume"] = df["volume"] / df["volume"].rolling(30, min_periods=1).mean()
-    return df
 
 
 class LiveBars:
