@@ -99,13 +99,34 @@ def load_training_frame() -> pd.DataFrame:
 
 
 def latest_feature_row(symbol: str) -> dict | None:
-    """Most recent feature vector for a symbol, for live inference."""
-    df = load_training_frame()
-    sub = df[df["symbol"] == symbol.lower()]
-    if sub.empty:
+    """Most recent feature vector for a symbol in the warehouse.
+
+    Reads the intermediate view because the ML mart drops the newest 3 bars, which
+    have no label yet. Falls back to the training frame if dbt hasn't run.
+    """
+    symbol = symbol.lower()
+    df = None
+    con = duckdb.connect(duckdb_path(), read_only=True)
+    try:
+        if _table_exists(con, "intermediate", "int_technical_features"):
+            df = con.execute(
+                f"select window_start, {', '.join(FEATURE_COLUMNS)} "
+                "from intermediate.int_technical_features "
+                "where symbol = ? and volatility_30 is not null "
+                "order by window_start desc limit 1",
+                [symbol],
+            ).df()
+    finally:
+        con.close()
+    if df is None:
+        df = load_training_frame()
+        df = df[df["symbol"] == symbol]
+    if df.empty:
         return None
-    row = sub.iloc[-1]
-    return {c: float(row[c]) for c in FEATURE_COLUMNS}
+    row = df.iloc[-1]
+    as_of = pd.Timestamp(row["window_start"])
+    as_of = as_of.tz_localize("UTC") if as_of.tzinfo is None else as_of.tz_convert("UTC")
+    return {**{c: float(row[c]) for c in FEATURE_COLUMNS}, "as_of": as_of.isoformat()}
 
 
 def build_xy(df: pd.DataFrame):
