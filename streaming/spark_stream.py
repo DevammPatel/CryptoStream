@@ -4,13 +4,15 @@ Reads the raw trade stream from Redpanda, computes windowed OHLCV + micro-struct
 features per symbol, and writes them as Parquet to the S3-compatible SeaweedFS lake.
 
 Three sinks:
-  1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, exactly-once via checkpoint)
-  2. 10s OHLCV features  -> s3a://<bucket>/features/ohlcv_10s/    (append)
+  1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, every minute)
+  2. 10s OHLCV features  -> s3a://<bucket>/features/ohlcv_10s/    (append, every minute)
   3. Live bars           -> Kafka topic crypto.bars_10s           (update, every 2 seconds)
 
 Append only writes a bar once the watermark passes it, so the lake is complete but
-about a minute behind. Update publishes each bar while it is still forming, which is
-what the API and dashboard read for the live view.
+a minute or two behind. Only the 15-minute batch reads it, so writing once a minute
+instead of every 10 seconds costs nothing and makes six times fewer files. Update
+publishes each bar while it is still forming, which is what the API and dashboard
+read for the live view.
 
 Run inside the `spark` container (see streaming/Dockerfile), which supplies the
 Kafka + Hadoop-AWS jars. Configure via env vars (see docker-compose.yml).
@@ -171,7 +173,7 @@ def main() -> None:
         .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/raw_trades/")
         .partitionBy("symbol")
         .outputMode("append")
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="1 minute")
         .start()
     )
 
@@ -182,7 +184,7 @@ def main() -> None:
         .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/ohlcv_10s/")
         .partitionBy("symbol")
         .outputMode("append")
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="1 minute")
         .start()
     )
 
