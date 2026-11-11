@@ -7,6 +7,7 @@ Covered:
   - model training produces a usable classifier and metadata
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
 
 Run:  pytest -q
 """
@@ -135,3 +136,119 @@ def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypat
     assert con.execute("select count(*) from intermediate.int_technical_features").fetchone()[0] > 0
     assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
     con.close()
+
+
+def make_bars(n, end_ms, symbol="btcusdt"):
+    """n finished 10s bars, the last one ending at end_ms, with a gently rising price."""
+    start_ms = end_ms - n * 10_000
+    return [
+        {
+            "symbol": symbol,
+            "window_start": start_ms + i * 10_000,
+            "window_end": start_ms + (i + 1) * 10_000,
+            "open": 100.0 + i,
+            "high": 101.0 + i,
+            "low": 99.0 + i,
+            "close": 100.5 + i,
+            "volume": 5.0 + i % 3,
+            "vwap": 100.2 + i,
+            "trade_count": 40,
+            "net_signed_volume": 0.5,
+            "order_flow_imbalance": 0.1,
+        }
+        for i in range(n)
+    ]
+
+
+def filled_store(bars):
+    from live import LiveBars
+
+    store = LiveBars()
+    for bar in bars:
+        store.update(bar)
+    return store
+
+
+def test_live_features_match_warehouse(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    import pandas as pd
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+    from features import FEATURE_COLUMNS
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    con = duckdb.connect(str(served), read_only=True)
+    raw = con.execute(
+        "select * from raw.ohlcv_10s where symbol = 'btcusdt' order by window_start desc limit 300"
+    ).df()
+    expected = con.execute(
+        "select * from intermediate.int_technical_features where symbol = 'btcusdt' "
+        "order by window_start desc limit 1"
+    ).df().iloc[0]
+    con.close()
+
+    bars = raw.to_dict("records")
+    for bar in bars:
+        bar["window_start"] = pd.Timestamp(bar["window_start"]).value // 10**6
+        bar["window_end"] = pd.Timestamp(bar["window_end"]).value // 10**6
+    now_ms = max(b["window_end"] for b in bars) + 1
+
+    feats = filled_store(bars).latest_features("btcusdt", now_ms=now_ms)
+    for column in FEATURE_COLUMNS:
+        assert feats[column] == pytest.approx(float(expected[column]), rel=1e-9, abs=1e-12), column
+
+
+def test_bar_updates_replace_the_same_window():
+    bars = make_bars(2, 1_700_000_000_000)
+    store = filled_store(bars + [dict(bars[-1], close=999.0)])
+    df = store.frame("btcusdt")
+    assert len(df) == 2
+    assert df.iloc[-1]["close"] == 999.0
+
+
+def test_live_features_skip_partial_and_stale_bars():
+    now_ms = 1_700_000_000_000
+    finished = make_bars(40, now_ms - 5_000)
+    forming = dict(make_bars(1, now_ms + 5_000)[0], close=999.0)
+    store = filled_store(finished + [forming])
+
+    feats = store.latest_features("btcusdt", now_ms=now_ms)
+    assert feats["as_of"].startswith("2023-11-14T22:13")
+    assert feats["ret_1"] < 0.5  # the jump to 999 in the forming bar would be far larger
+
+    assert store.latest_features("btcusdt", now_ms=now_ms + 60_000) is None
+    assert filled_store(make_bars(10, now_ms)).latest_features("btcusdt", now_ms=now_ms) is None
+
+
+def test_consumer_reads_bars_from_kafka():
+    import json
+    import threading
+    import time
+
+    from confluent_kafka import Producer
+    from live import LiveBars, consume_bars
+
+    # librdkafka's built-in mock cluster: a real broker protocol with no broker to run.
+    producer = Producer({"bootstrap.servers": "", "test.mock.num.brokers": 1})
+    broker = list(producer.list_topics(timeout=5).brokers.values())[0]
+    for bar in make_bars(3, 1_700_000_000_000):
+        producer.produce("crypto.bars_10s", key=bar["symbol"], value=json.dumps(bar))
+    producer.produce("crypto.bars_10s", key="btcusdt", value="not json")
+    assert producer.flush(5) == 0
+
+    store, stop = LiveBars(), threading.Event()
+    thread = threading.Thread(
+        target=consume_bars, args=(store, f"{broker.host}:{broker.port}", "crypto.bars_10s", stop)
+    )
+    thread.start()
+    deadline = time.time() + 15
+    while time.time() < deadline and (store.frame("btcusdt") is None or len(store.frame("btcusdt")) < 3):
+        time.sleep(0.1)
+    stop.set()
+    thread.join(10)
+
+    assert not thread.is_alive()
+    assert len(store.frame("btcusdt")) == 3
