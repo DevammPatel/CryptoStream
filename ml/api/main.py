@@ -25,7 +25,7 @@ ML_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ML_DIR not in sys.path:
     sys.path.insert(0, ML_DIR)
 
-from features import FEATURE_COLUMNS, latest_feature_row  # noqa: E402
+from features import FEATURE_COLUMNS, duckdb_path, latest_feature_row  # noqa: E402
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/train.py
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
@@ -105,6 +105,8 @@ def predict(features: Features) -> Prediction:
 
 @app.get("/predict/{symbol}", response_model=Prediction)
 def predict_symbol(symbol: str) -> Prediction:
+    if not os.path.exists(duckdb_path()):
+        raise HTTPException(status_code=503, detail="Warehouse not built yet.")
     feats = latest_feature_row(symbol)
     if feats is None:
         raise HTTPException(status_code=404, detail=f"No live features for '{symbol}'.")
