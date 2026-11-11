@@ -2,7 +2,7 @@
 
 Covered:
   - ingestion.normalise maps Binance payloads to the canonical schema
-  - ingestion gives up only on errors retrying can't fix
+  - ingestion stops cleanly on SIGTERM and gives up only on errors retrying can't fix
   - synthetic data generation + DuckDB round-trip
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
@@ -58,6 +58,56 @@ def test_only_refusals_stop_reconnecting():
     assert is_fatal(InvalidStatusCode(451, Headers()))
     assert not is_fatal(InvalidStatusCode(503, Headers()))
     assert not is_fatal(ConnectionResetError())
+
+
+def serve_fake_trades():
+    """A local WebSocket server that streams Binance-shaped trades. Returns its port."""
+    import asyncio
+    import json
+    import threading
+
+    import websockets
+
+    ready, state = threading.Event(), {}
+
+    async def handler(ws, *args):
+        trade_id = 0
+        while True:
+            trade_id += 1
+            data = {"e": "trade", "s": "BTCUSDT", "t": trade_id, "p": "62000.5", "q": "0.01", "T": 1700000000000, "m": False}
+            await ws.send(json.dumps({"stream": "btcusdt@trade", "data": data}))
+            await asyncio.sleep(0.05)
+
+    async def run():
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            state["port"] = server.sockets[0].getsockname()[1]
+            ready.set()
+            await asyncio.Future()
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    assert ready.wait(5)
+    return state["port"]
+
+
+def test_ingestion_stops_cleanly_on_sigterm(tmp_path):
+    import signal
+    import time
+
+    port = serve_fake_trades()
+    log_path = tmp_path / "ingestion.log"
+    env = dict(os.environ, BINANCE_WS_BASE=f"ws://127.0.0.1:{port}/stream?streams=", KAFKA_BOOTSTRAP="127.0.0.1:9")
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(REPO, "ingestion", "ws_producer.py")], env=env, stdout=log, stderr=log
+        )
+    deadline = time.time() + 15
+    while "connected to" not in log_path.read_text() and time.time() < deadline:
+        time.sleep(0.2)
+    assert "connected to" in log_path.read_text()
+
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=15) == 0
+    assert "shutting down after" in log_path.read_text()
 
 
 @pytest.fixture(scope="session")
