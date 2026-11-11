@@ -125,9 +125,13 @@ test compares the two, so a change to one fails until the other matches.
 
 | Volume | Written by | Read by |
 |---|---|---|
+| `redpanda-data` (Kafka topics) | Ingestion, Spark | Spark, API |
 | `lake-data` | Spark, through the S3 API | Dagster, through the S3 API |
 | `warehouse-data` (DuckDB file) | Dagster | API, dashboard |
 | `models-data` | Dagster | API |
+
+`make down` keeps every volume. Spark's checkpoints live in `lake-data` and point at
+offsets in `redpanda-data`, so wipe them together with `make clean`, never one alone.
 
 DuckDB locks a file against other processes, so Dagster never writes the served file.
 It builds a copy in `.build/` and renames it over the served file after dbt's tests

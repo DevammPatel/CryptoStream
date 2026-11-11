@@ -20,6 +20,10 @@ services:
     ports:
       - "9092:9092"
       - "29092:29092"
+    volumes:
+      # Keeps topics and offsets across restarts. Spark's checkpoints in the lake point
+      # at these offsets, so the two must survive or be wiped together (`make clean`).
+      - redpanda-data:/var/lib/redpanda/data
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 10s
@@ -202,6 +206,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  redpanda-data:
   lake-data:
   mlflow-data:
   warehouse-data:
