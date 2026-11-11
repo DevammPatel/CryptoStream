@@ -4,6 +4,7 @@ Covered:
   - ingestion.normalise maps Binance payloads to the canonical schema
   - ingestion stops cleanly on SIGTERM and gives up only on errors retrying can't fix
   - synthetic data generation + DuckDB round-trip, at a realistic and repeatable scale
+  - the market summary judges volatility against each symbol's own baseline
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
   - Dagster definitions load and the refresh schedule is on
@@ -149,6 +150,15 @@ def test_sample_data_is_realistic_and_repeatable(tmp_path):
     assert np.allclose(closes[0], closes[1])  # same prices on every run
     bar_vol = np.diff(np.log(closes[0])).std()
     assert 0.0001 < bar_vol < 0.001  # real BTC moves roughly 0.02-0.03% per 10s bar
+
+
+def test_summary_judges_volatility_against_its_own_baseline():
+    from llm.market_agent import _describe
+
+    row = {"symbol": "btcusdt", "last_return": 0.0001, "px_vs_sma30": 0.001, "order_flow_imbalance": 0.0}
+    assert "elevated volatility" in _describe({**row, "volatility_30": 0.0006, "typical_volatility_30": 0.0003})
+    assert "subdued volatility" in _describe({**row, "volatility_30": 0.0001, "typical_volatility_30": 0.0003})
+    assert "normal volatility" in _describe({**row, "volatility_30": 0.0003, "typical_volatility_30": 0.0003})
 
 
 def test_feature_frame(sample_data):

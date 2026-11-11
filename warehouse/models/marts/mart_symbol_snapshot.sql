@@ -16,6 +16,7 @@ daily as (
         max(high)                                       as high_window,
         min(low)                                        as low_window,
         sum(volume)                                     as total_volume,
+        median(volatility_30)                           as typical_volatility_30,
         count(*)                                        as bars
     from feats
     group by 1
@@ -28,6 +29,7 @@ select
     r.ret_1                                              as last_return,
     r.px_vs_sma30,
     r.volatility_30,
+    d.typical_volatility_30,
     r.order_flow_imbalance,
     r.rel_volume,
     d.high_window,
