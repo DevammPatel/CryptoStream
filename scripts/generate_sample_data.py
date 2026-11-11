@@ -74,7 +74,8 @@ def main() -> None:
 
     symbols = [s.strip().lower() for s in args.symbols.split(",") if s.strip()]
     n = args.minutes * 6  # 6 ten-second bars per minute
-    start_ts = datetime.now(timezone.utc) - timedelta(minutes=args.minutes)
+    # Plain UTC timestamps, like the ones Spark writes.
+    start_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=args.minutes)
 
     os.makedirs(LAKE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)

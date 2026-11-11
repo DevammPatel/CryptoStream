@@ -13,6 +13,7 @@ Covered:
   - the warehouse swap keeps views working and never blocks a reader
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
+  - bar times stay UTC whatever the time zone of the machine reading them
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
 
@@ -327,6 +328,35 @@ def test_indicators_and_labels_match_dbt_across_gaps(sample_data, tmp_path, monk
     assert mart["window_start"].add(pd.Timedelta(seconds=30)).isin(set(sql["window_start"])).all()
     assert len(fallback) == len(mart)
     assert (fallback["label_up_3"].to_numpy() == mart["label_up_3"].to_numpy()).all()
+
+
+def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):
+    import duckdb
+    import pandas as pd
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    # A time-zone-aware file next to a plain one, in summer, when London is UTC+1.
+    lake = tmp_path / "lake" / "symbol=btcusdt"
+    lake.mkdir(parents=True)
+    bar = {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "vwap": 1.0,
+           "trade_count": 1, "net_signed_volume": 0.0, "order_flow_imbalance": 0.0}
+    aware = pd.date_range("2026-07-01 12:00", periods=40, freq="10s", tz="UTC")
+    pd.DataFrame({"window_start": aware, "window_end": aware + pd.Timedelta(seconds=10), **bar}).to_parquet(lake / "a.parquet")
+    plain = aware.tz_localize(None) + pd.Timedelta(minutes=10)
+    pd.DataFrame({"window_start": plain, "window_end": plain + pd.Timedelta(seconds=10), **bar}).to_parquet(lake / "b.parquet")
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("LAKE_URI", str(tmp_path / "lake"))
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    con = duckdb.connect(str(served), read_only=True)
+    con.execute("SET TimeZone = 'Europe/London'")
+    first, last = con.execute("select min(window_start), max(window_start) from staging.stg_ohlcv").fetchone()
+    con.close()
+    assert str(first) == "2026-07-01 12:00:00"
+    assert str(last) == "2026-07-01 12:16:30"
 
 
 def make_bars(n, end_ms, symbol="btcusdt"):

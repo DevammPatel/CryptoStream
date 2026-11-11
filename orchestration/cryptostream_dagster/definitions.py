@@ -104,11 +104,19 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
                 f"No parquet found under {lake_uri()}. Run the sample generator or start the Spark job."
             )
         con.execute("CREATE SCHEMA raw;")
+        # Store every bar time as plain UTC. A time-zone-aware file would otherwise be
+        # converted later, in whichever session reads the views, using that machine's
+        # zone: on a Mac in BST every bar would shift by an hour.
+        con.execute("SET TimeZone = 'UTC';")
         # hive_partitioning recovers the symbol=... partition column from the path.
         con.execute(
             f"""
             CREATE TABLE raw.ohlcv_10s AS
-            SELECT * FROM read_parquet('{parquet}', hive_partitioning=true)
+            SELECT * REPLACE (
+                CAST(window_start AS TIMESTAMP) AS window_start,
+                CAST(window_end AS TIMESTAMP) AS window_end
+            )
+            FROM read_parquet('{parquet}', hive_partitioning=true)
             """
         )
         n = con.execute("SELECT count(*) FROM raw.ohlcv_10s").fetchone()[0]
