@@ -113,7 +113,7 @@ make ps           # check services
 - **`orchestration/`** — Dagster asset DAG (`lake → dbt → model → summary`) with a
   15-minute refresh schedule.
 - **`dashboard/app.py`** — Streamlit: candlesticks + VWAP, indicators, live model call,
-  and the market summary.
+  and the market summary. Refreshes itself every 5 seconds.
 
 ---
 

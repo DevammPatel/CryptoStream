@@ -3,6 +3,9 @@
 Shows, per symbol: price + VWAP candles, technical indicators, the ML model's
 next-move prediction (via the FastAPI service), and the LLM market summary.
 
+Bars come from the API's live feed and refresh every 5 seconds. When the feed isn't
+available (offline demo, or the API is down) they come from the DuckDB warehouse.
+
 Run:  streamlit run dashboard/app.py
 """
 from __future__ import annotations
@@ -49,6 +52,8 @@ def load_symbols() -> list[str]:
 
 @st.cache_data(ttl=10)
 def load_bars(symbol: str, limit: int = 300) -> pd.DataFrame:
+    if not os.path.exists(DUCKDB_PATH):
+        return pd.DataFrame()
     con = duckdb.connect(DUCKDB_PATH, read_only=True)
     try:
         try:
@@ -70,9 +75,9 @@ def load_bars(symbol: str, limit: int = 300) -> pd.DataFrame:
     return df.sort_values("window_start").reset_index(drop=True)
 
 
-def get_prediction(symbol: str) -> dict | None:
+def api_get(path: str):
     try:
-        r = requests.get(f"{API_URL}/predict/{symbol}", timeout=3)
+        r = requests.get(f"{API_URL}{path}", timeout=3)
         if r.ok:
             return r.json()
     except requests.RequestException:
@@ -80,21 +85,95 @@ def get_prediction(symbol: str) -> dict | None:
     return None
 
 
+def load_live_bars(symbol: str) -> pd.DataFrame | None:
+    """Bars the API holds in memory, including the one still forming."""
+    rows = api_get(f"/bars/{symbol}?limit=300")
+    if not rows:
+        return None
+    df = pd.DataFrame(rows).astype({"px_vs_sma30": float, "volatility_30": float, "rel_volume": float})
+    df["window_start"] = pd.to_datetime(df["window_start"], unit="ms", utc=True)
+    return df
+
+
+def available_symbols() -> list[str]:
+    live = (api_get("/symbols") or {}).get("symbols", [])
+    return sorted(set(load_symbols()) | set(live))
+
+
+@st.cache_data(ttl=300)  # an LLM call costs money, so never repeat it on a page refresh
 def get_summary() -> str:
     from llm.market_agent import generate_market_summary
 
     return generate_market_summary()
 
 
-# ------------------------------ UI ------------------------------
-st.title("📈 CryptoStream — Real-Time Crypto Analytics & Prediction")
-
-symbols = load_symbols()
-if not symbols:
+@st.fragment(run_every="5s")
+def wait_for_data() -> None:
     st.warning(
         "No data yet. Run `python scripts/generate_sample_data.py` (offline demo) "
         "or start the live stack with `make up`."
     )
+    if available_symbols():
+        st.rerun()
+
+
+@st.fragment(run_every="5s")
+def live_view(symbol: str) -> None:
+    """Everything that moves. Only this part reruns on the timer."""
+    bars = load_live_bars(symbol)
+    source = "Live stream"
+    if bars is None:
+        bars = load_bars(symbol)
+        source = "Warehouse (refreshes every 15 minutes)"
+    if bars.empty:
+        st.info("Waiting for bars.")
+        return
+    latest = bars.iloc[-1]
+    st.caption(f"Source: {source}")
+
+    # KPI row
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Last price", f"${latest['close']:,.2f}")
+    if "px_vs_sma30" in bars:
+        c2.metric("vs SMA-30", f"{latest['px_vs_sma30']*100:+.2f}%")
+        c3.metric("Volatility (30)", f"{latest['volatility_30']*100:.3f}%")
+        c4.metric("Order-flow imbalance", f"{latest['order_flow_imbalance']:+.2f}")
+
+    # Prediction banner
+    pred = api_get(f"/predict/{symbol}")
+    if pred:
+        arrow = "🟢 ▲ UP" if pred["direction"] == "up" else "🔴 ▼ DOWN"
+        st.subheader(f"Model call: {arrow}  ·  P(up)={pred['prob_up']:.2f}  ·  confidence={pred['confidence']:.2f}")
+        if pred.get("as_of"):
+            age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(pred["as_of"])).total_seconds()
+            st.caption(f"Based on the {pred['source']} bar from {age:.0f}s ago")
+    else:
+        st.info("Prediction service unavailable — train the model and start the API (`make api`).")
+
+    # Candles + VWAP
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=bars["window_start"], open=bars["open"], high=bars["high"],
+            low=bars["low"], close=bars["close"], name="Price",
+        )
+    )
+    if "vwap" in bars:
+        fig.add_trace(go.Scatter(x=bars["window_start"], y=bars["vwap"], name="VWAP", line=dict(width=1)))
+    fig.update_layout(height=430, margin=dict(l=10, r=10, t=30, b=10), xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    vfig = go.Figure(go.Bar(x=bars["window_start"], y=bars["volume"], name="Volume"))
+    vfig.update_layout(height=220, margin=dict(l=10, r=10, t=30, b=10), title="Volume")
+    st.plotly_chart(vfig, use_container_width=True)
+
+
+# ------------------------------ UI ------------------------------
+st.title("📈 CryptoStream — Real-Time Crypto Analytics & Prediction")
+
+symbols = available_symbols()
+if not symbols:
+    wait_for_data()
     st.stop()
 
 with st.sidebar:
@@ -105,49 +184,12 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-bars = load_bars(symbol)
-latest = bars.iloc[-1]
+live_view(symbol)
 
-# KPI row
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Last price", f"${latest['close']:,.2f}")
-if "px_vs_sma30" in bars:
-    c2.metric("vs SMA-30", f"{latest['px_vs_sma30']*100:+.2f}%")
-    c3.metric("Volatility (30)", f"{latest['volatility_30']*100:.3f}%")
-    c4.metric("Order-flow imbalance", f"{latest['order_flow_imbalance']:+.2f}")
-
-# Prediction banner
-pred = get_prediction(symbol)
-if pred:
-    arrow = "🟢 ▲ UP" if pred["direction"] == "up" else "🔴 ▼ DOWN"
-    st.subheader(f"Model call: {arrow}  ·  P(up)={pred['prob_up']:.2f}  ·  confidence={pred['confidence']:.2f}")
-else:
-    st.info("Prediction service unavailable — train the model and start the API (`make api`).")
-
-# Candles + VWAP
-fig = go.Figure()
-fig.add_trace(
-    go.Candlestick(
-        x=bars["window_start"], open=bars["open"], high=bars["high"],
-        low=bars["low"], close=bars["close"], name="Price",
-    )
-)
-if "vwap" in bars:
-    fig.add_trace(go.Scatter(x=bars["window_start"], y=bars["vwap"], name="VWAP", line=dict(width=1)))
-fig.update_layout(height=430, margin=dict(l=10, r=10, t=30, b=10), xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-# Volume + LLM summary
-left, right = st.columns([2, 1])
-with left:
-    vfig = go.Figure(go.Bar(x=bars["window_start"], y=bars["volume"], name="Volume"))
-    vfig.update_layout(height=220, margin=dict(l=10, r=10, t=30, b=10), title="Volume")
-    st.plotly_chart(vfig, use_container_width=True)
-with right:
-    st.markdown("### 🧠 Market summary")
-    try:
-        st.markdown(get_summary())
-    except Exception as exc:
-        st.caption(f"Summary unavailable: {exc}")
+st.markdown("### 🧠 Market summary")
+try:
+    st.markdown(get_summary())
+except Exception as exc:
+    st.caption(f"Summary unavailable: {exc}")
 
 st.caption("Data: Binance public WebSocket · Pipeline: Redpanda → Spark → SeaweedFS → dbt/DuckDB → LightGBM → FastAPI")
