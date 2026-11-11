@@ -7,15 +7,21 @@ Assets (DAG):
 generator) into DuckDB's raw schema. dbt then builds staging/marts, the ML asset
 trains + logs to MLflow, and the summary asset produces the LLM market read.
 
+Env vars:
+    LAKE_URI        local folder or s3://bucket/path of the feature lake
+    LAKE_ENDPOINT   S3 endpoint, needed when LAKE_URI is s3://
+    LAKE_ACCESS_KEY, LAKE_SECRET_KEY
+    DUCKDB_PATH     the warehouse file
+
 Run the UI:   dagster dev -m cryptostream_dagster.definitions
 
 Dagster inspects the `context` annotation at runtime, so this module must not use
 `from __future__ import annotations`.
 """
-import glob
 import os
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 import duckdb
 from dagster import (
@@ -30,33 +36,63 @@ from dagster import (
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LAKE_DIR = os.path.join(REPO, "data", "lake", "features", "ohlcv_10s")
-DUCKDB_PATH = os.path.join(REPO, "data", "warehouse", "crypto.duckdb")
 WAREHOUSE_DIR = os.path.join(REPO, "warehouse")
 
 
-@asset(description="Load Parquet feature lake into DuckDB raw.ohlcv_10s.")
-def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
-    os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)
-    parts = glob.glob(os.path.join(LAKE_DIR, "**", "*.parquet"), recursive=True)
-    if not parts:
-        raise Exception(
-            f"No parquet found under {LAKE_DIR}. Run the sample generator or start the Spark job."
-        )
-    con = duckdb.connect(DUCKDB_PATH)
-    con.execute("CREATE SCHEMA IF NOT EXISTS raw;")
-    con.execute("DROP TABLE IF EXISTS raw.ohlcv_10s;")
-    # hive_partitioning recovers the symbol=... partition column from the path.
+def lake_uri() -> str:
+    return os.getenv("LAKE_URI", os.path.join(REPO, "data", "lake", "features", "ohlcv_10s")).rstrip("/")
+
+
+def served_path() -> str:
+    return os.getenv("DUCKDB_PATH", os.path.join(REPO, "data", "warehouse", "crypto.duckdb"))
+
+
+def connect_lake_storage(con: duckdb.DuckDBPyConnection) -> None:
+    """Give DuckDB credentials for an S3 lake. A local lake needs nothing."""
+    if not lake_uri().startswith("s3://"):
+        return
+    endpoint = urlparse(os.environ["LAKE_ENDPOINT"])
+    con.execute("LOAD httpfs;")
     con.execute(
         f"""
-        CREATE TABLE raw.ohlcv_10s AS
-        SELECT * FROM read_parquet('{LAKE_DIR}/**/*.parquet', hive_partitioning=true)
+        CREATE SECRET lake (
+            TYPE S3,
+            KEY_ID '{os.environ["LAKE_ACCESS_KEY"]}',
+            SECRET '{os.environ["LAKE_SECRET_KEY"]}',
+            ENDPOINT '{endpoint.netloc}',
+            URL_STYLE 'path',
+            USE_SSL {str(endpoint.scheme == "https").lower()}
+        );
         """
     )
-    n = con.execute("SELECT count(*) FROM raw.ohlcv_10s").fetchone()[0]
-    con.close()
+
+
+@asset(description="Load the Parquet feature lake into DuckDB raw.ohlcv_10s.")
+def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
+    os.makedirs(os.path.dirname(served_path()), exist_ok=True)
+    parquet = f"{lake_uri()}/**/*.parquet"
+    con = duckdb.connect(served_path())
+    try:
+        connect_lake_storage(con)
+        files = con.execute("SELECT count(*) FROM glob(?)", [parquet]).fetchone()[0]
+        if not files:
+            raise Exception(
+                f"No parquet found under {lake_uri()}. Run the sample generator or start the Spark job."
+            )
+        con.execute("CREATE SCHEMA IF NOT EXISTS raw;")
+        con.execute("DROP TABLE IF EXISTS raw.ohlcv_10s;")
+        # hive_partitioning recovers the symbol=... partition column from the path.
+        con.execute(
+            f"""
+            CREATE TABLE raw.ohlcv_10s AS
+            SELECT * FROM read_parquet('{parquet}', hive_partitioning=true)
+            """
+        )
+        n = con.execute("SELECT count(*) FROM raw.ohlcv_10s").fetchone()[0]
+    finally:
+        con.close()
     context.log.info("loaded %d rows into raw.ohlcv_10s", n)
-    return MaterializeResult(metadata={"rows": MetadataValue.int(int(n)), "files": len(parts)})
+    return MaterializeResult(metadata={"rows": MetadataValue.int(int(n)), "files": int(files)})
 
 
 @asset(deps=[lake_to_duckdb], description="Run dbt build (models + tests).")
