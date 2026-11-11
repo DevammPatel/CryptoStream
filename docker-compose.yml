@@ -94,6 +94,7 @@ services:
       KAFKA_BOOTSTRAP: redpanda:29092
       SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
       TRADES_TOPIC: ${TRADES_TOPIC:-crypto.trades}
+      BINANCE_WS_BASE: ${BINANCE_WS_BASE:-wss://data-stream.binance.vision/stream?streams=}
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

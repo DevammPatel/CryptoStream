@@ -2,6 +2,7 @@
 
 Covered:
   - ingestion.normalise maps Binance payloads to the canonical schema
+  - ingestion gives up only on errors retrying can't fix
   - synthetic data generation + DuckDB round-trip
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
@@ -46,6 +47,17 @@ def test_normalise_ignores_non_trade():
     from ingestion.ws_producer import normalise
 
     assert normalise({"data": {"e": "depthUpdate"}}) is None
+
+
+def test_only_refusals_stop_reconnecting():
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatusCode
+
+    from ingestion.ws_producer import is_fatal
+
+    assert is_fatal(InvalidStatusCode(451, Headers()))
+    assert not is_fatal(InvalidStatusCode(503, Headers()))
+    assert not is_fatal(ConnectionResetError())
 
 
 @pytest.fixture(scope="session")

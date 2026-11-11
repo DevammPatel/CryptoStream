@@ -5,7 +5,7 @@ publishes normalised trade events to a Kafka topic. Designed to run forever with
 automatic reconnection and exponential backoff.
 
 Run locally:   python ingestion/ws_producer.py
-Env vars:      KAFKA_BOOTSTRAP, SYMBOLS, TRADES_TOPIC
+Env vars:      KAFKA_BOOTSTRAP, SYMBOLS, TRADES_TOPIC, BINANCE_WS_BASE
 """
 from __future__ import annotations
 
@@ -31,7 +31,12 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 SYMBOLS = [s.strip().lower() for s in os.getenv("SYMBOLS", "btcusdt,ethusdt,solusdt").split(",") if s.strip()]
 TRADES_TOPIC = os.getenv("TRADES_TOPIC", "crypto.trades")
 
-BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+# Binance's market-data-only endpoint. wss://stream.binance.com:9443/stream?streams=
+# sends the same data but answers HTTP 451 in some regions, such as the US.
+BINANCE_WS_BASE = os.getenv("BINANCE_WS_BASE", "wss://data-stream.binance.vision/stream?streams=")
+
+# HTTP statuses that mean Binance refuses this client, so reconnecting cannot help.
+FATAL_STATUSES = {401, 403, 451}
 
 
 def build_stream_url(symbols: list[str]) -> str:
@@ -78,6 +83,11 @@ def _delivery_report(err, msg) -> None:
         log.warning("delivery failed: %s", err)
 
 
+def is_fatal(exc: Exception) -> bool:
+    """True when reconnecting cannot help, e.g. HTTP 451 from a restricted region."""
+    return getattr(exc, "status_code", None) in FATAL_STATUSES
+
+
 class GracefulExit(Exception):
     pass
 
@@ -94,7 +104,7 @@ async def stream_forever() -> None:
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                log.info("connected to Binance stream")
+                log.info("connected to %s", url.split("/stream")[0])
                 backoff = 1  # reset after a successful connect
                 async for message in ws:
                     raw = json.loads(message)
@@ -113,7 +123,12 @@ async def stream_forever() -> None:
                         log.info("produced %d trades (last %s @ %.2f)", count, event["symbol"], event["price"])
                     else:
                         producer.poll(0)
-        except (websockets.ConnectionClosed, OSError) as exc:
+        except (websockets.WebSocketException, OSError) as exc:
+            if is_fatal(exc):
+                raise SystemExit(
+                    f"Binance refused the connection ({exc}). If your region is blocked, "
+                    "set BINANCE_WS_BASE to another endpoint."
+                ) from exc
             log.warning("connection dropped (%s); reconnecting in %ss", exc, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
