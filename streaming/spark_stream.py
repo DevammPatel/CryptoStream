@@ -78,6 +78,9 @@ def read_trades(spark: SparkSession):
         .option("subscribe", TRADES_TOPIC)
         .option("startingOffsets", "earliest")
         .option("maxOffsetsPerTrigger", 20000)
+        # If the stack was off longer than Kafka's retention, carry on from what is
+        # left. A gap in a live feed is better than a job that can never restart.
+        .option("failOnDataLoss", "false")
         .load()
     )
     parsed = (
