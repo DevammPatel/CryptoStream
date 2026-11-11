@@ -13,6 +13,7 @@ Covered:
   - the warehouse swap keeps views working and never blocks a reader
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
+  - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
   - bar times stay UTC whatever the time zone of the machine reading them
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
@@ -328,6 +329,62 @@ def test_indicators_and_labels_match_dbt_across_gaps(sample_data, tmp_path, monk
     assert mart["window_start"].add(pd.Timedelta(seconds=30)).isin(set(sql["window_start"])).all()
     assert len(fallback) == len(mart)
     assert (fallback["label_up_3"].to_numpy() == mart["label_up_3"].to_numpy()).all()
+
+
+def kline(open_ms, o, h, low, c, volume, trades, taker_buy):
+    """One Binance 1s kline row: the fields the backfill reads, quote volume = volume * close."""
+    return [open_ms, str(o), str(h), str(low), str(c), str(volume), open_ms + 999,
+            str(volume * c), trades, str(taker_buy), str(taker_buy * c), "0"]
+
+
+def test_backfill_rolls_klines_into_spark_shaped_bars():
+    from cryptostream_dagster.backfill import COLUMNS, bars_from_klines
+
+    t0 = 1_700_000_000_000
+    rows = [
+        kline(t0, 100, 101, 99, 100.5, 2.0, 10, 1.5),
+        kline(t0 + 1000, 100.5, 103, 100, 102, 1.0, 5, 0.0),
+        kline(t0 + 2000, 102, 102, 102, 102, 0.0, 0, 0.0),        # no trades: ignored
+        kline(t0 + 10_000, 102, 102.5, 101.5, 101.8, 4.0, 8, 3.0),  # next 10s window
+    ]
+    bars = bars_from_klines(rows)
+    assert list(bars.columns) == COLUMNS
+    first = bars.iloc[0]
+    assert (first["open"], first["high"], first["low"], first["close"]) == (100, 103, 99, 102)
+    assert first["volume"] == 3.0 and first["trade_count"] == 15
+    assert first["net_signed_volume"] == 2 * 1.5 - 3.0  # taker buys minus the rest
+    assert abs(first["vwap"] - (2.0 * 100.5 + 1.0 * 102) / 3.0) < 1e-9
+    assert (bars["window_end"] - bars["window_start"]).dt.total_seconds().eq(10).all()
+    assert len(bars) == 2
+
+    # The bulk files use microseconds; the result must be the same.
+    in_us = [[r[0] * 1000, *r[1:]] for r in rows]
+    assert bars_from_klines(in_us).equals(bars)
+
+
+def test_backfill_files_load_next_to_spark_files(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    import pandas as pd
+    from cryptostream_dagster.backfill import bars_from_klines, write_day
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    lake = lake_with_gaps(tmp_path)
+    monkeypatch.setenv("LAKE_URI", lake)
+    monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
+    t0 = 1_600_000_000_000  # far from the sample bars, so nothing overlaps
+    rows = [kline(t0 + i * 1000, 100, 101, 99, 100, 1.0, 3, 0.5) for i in range(60)]
+    con = duckdb.connect()
+    write_day(con, bars_from_klines(rows), "btcusdt", "2020-09-13")
+    con.close()
+
+    assert materialize([lake_to_duckdb, dbt_models]).success
+    con = duckdb.connect(str(tmp_path / "crypto.duckdb"), read_only=True)
+    backfilled = con.execute(
+        "select count(*) from intermediate.int_technical_features where window_start < ?", [pd.Timestamp(t0 + 3_600_000, unit="ms")]
+    ).fetchone()[0]
+    con.close()
+    assert backfilled == 6
 
 
 def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):

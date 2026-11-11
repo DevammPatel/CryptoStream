@@ -71,6 +71,13 @@ make api         # FastAPI at http://localhost:8000  (docs at /docs)
 make dashboard   # Streamlit at http://localhost:8501
 ```
 
+To use real market history instead of synthetic bars (needs internet, no Docker):
+
+```bash
+make backfill-local DAYS=2   # real Binance 10s bars -> data/lake
+make refresh                 # Dagster pipeline once: lake -> dbt -> model -> summary
+```
+
 ### Option B — Full live stack (Docker)
 
 Streams **live** Binance trades through the whole pipeline.
@@ -86,6 +93,9 @@ make ps           # check services
 # Every 15 minutes Dagster builds the marts and retrains on the collected data.
 # Early runs fail until there is enough data: the dashboard fills in after the first
 # run that finds bars, and predictions start at about 200 rows (15 to 30 minutes).
+
+make backfill     # optional: load 7 days of real history (about 3 minutes) so the
+                  # next scheduled run trains on a week of data straight away
 ```
 
 ---

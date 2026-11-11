@@ -108,7 +108,8 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
         # converted later, in whichever session reads the views, using that machine's
         # zone: on a Mac in BST every bar would shift by an hour.
         con.execute("SET TimeZone = 'UTC';")
-        # hive_partitioning recovers the symbol=... partition column from the path.
+        # hive_partitioning recovers the symbol=... partition column from the path, and
+        # union_by_name lines up columns by name across Spark, backfill and sample files.
         con.execute(
             f"""
             CREATE TABLE raw.ohlcv_10s AS
@@ -116,7 +117,7 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
                 CAST(window_start AS TIMESTAMP) AS window_start,
                 CAST(window_end AS TIMESTAMP) AS window_end
             )
-            FROM read_parquet('{parquet}', hive_partitioning=true)
+            FROM read_parquet('{parquet}', hive_partitioning=true, union_by_name=true)
             """
         )
         n = con.execute("SELECT count(*) FROM raw.ohlcv_10s").fetchone()[0]

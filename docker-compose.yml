@@ -156,6 +156,7 @@ services:
       DUCKDB_PATH: /data/warehouse/crypto.duckdb
       MODEL_DIR: /models
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
     ports:
       - "3000:3000"
     volumes:

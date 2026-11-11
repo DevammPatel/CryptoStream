@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import zlib
 from datetime import datetime, timedelta, timezone
 
@@ -74,7 +75,7 @@ def main() -> None:
 
     symbols = [s.strip().lower() for s in args.symbols.split(",") if s.strip()]
     n = args.minutes * 6  # 6 ten-second bars per minute
-    # Plain UTC timestamps, like the ones Spark writes.
+    # Plain UTC timestamps, like the ones Spark and the backfill write.
     start_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=args.minutes)
 
     os.makedirs(LAKE_DIR, exist_ok=True)
@@ -84,8 +85,13 @@ def main() -> None:
     for sym in symbols:
         df = simulate_symbol(sym, START_PRICES.get(sym, 100.0), n, start_ts)
         part_dir = os.path.join(LAKE_DIR, f"symbol={sym}")
-        os.makedirs(part_dir, exist_ok=True)
-        df.drop(columns=["symbol"]).to_parquet(os.path.join(part_dir, "part-000.parquet"), index=False)
+        # Replace, don't add: mixing synthetic prices with real or older bars would
+        # give nonsense. The live lake lives in SeaweedFS, not here.
+        shutil.rmtree(part_dir, ignore_errors=True)
+        os.makedirs(part_dir)
+        # Named apart from Spark's part-* files and the backfill's files, so it never
+        # gets mistaken for real data.
+        df.drop(columns=["symbol"]).to_parquet(os.path.join(part_dir, "sample.parquet"), index=False)
         frames.append(df)
         print(f"  {sym}: {len(df):,} bars")
 

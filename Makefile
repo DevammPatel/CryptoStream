@@ -1,4 +1,4 @@
-.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster reset-bar-state dbt test lint fmt seed
+.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster refresh backfill backfill-local reset-bar-state dbt test lint fmt seed
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -39,6 +39,16 @@ dashboard:  ## Run the Streamlit dashboard locally
 
 dagster:  ## Run the Dagster UI and the 15-minute schedule
 	dagster dev -m cryptostream_dagster.definitions
+
+refresh:  ## Run the Dagster pipeline once, locally: lake -> dbt -> model -> summary
+	dagster asset materialize --select '*' -m cryptostream_dagster.definitions
+
+DAYS ?= 7
+backfill:  ## Load DAYS (default 7) of real Binance history into the Docker lake
+	docker compose exec dagster python -m cryptostream_dagster.backfill --days $(DAYS)
+
+backfill-local:  ## Load DAYS of real Binance history into data/lake (use instead of `make seed`)
+	python -m cryptostream_dagster.backfill --days $(DAYS)
 
 LAKE_BUCKET ?= crypto-lake
 FILER = http://localhost:8888/buckets/$(LAKE_BUCKET)
