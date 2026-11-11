@@ -127,7 +127,8 @@ curl -s localhost:8000/predict/btcusdt
 
 curl -s -X POST localhost:8000/predict \
   -H 'content-type: application/json' \
-  -d '{"ret_1":0.001,"volatility_30":0.002,"rel_volume":1.2}'
+  -d '{"ret_1":0.0001,"log_ret_1":0.0001,"px_vs_sma30":0.0004,"volatility_30":0.0003,
+       "order_flow_imbalance":0.2,"ofi_6":0.1,"rel_volume":1.1,"trade_count":400}'
 ```
 
 ---

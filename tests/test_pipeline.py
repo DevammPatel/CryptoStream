@@ -477,6 +477,15 @@ def test_api_predicts_from_live_bars(api):
     assert client.get("/bars/dogeusdt").status_code == 404
 
 
+def test_api_requires_every_feature(api):
+    from features import FEATURE_COLUMNS
+
+    main, client = api
+    assert client.post("/predict", json={"ret_1": 0.001}).status_code == 422
+    body = client.post("/predict", json={c: 0.1 for c in FEATURE_COLUMNS}).json()
+    assert body["source"] == "request"
+
+
 def test_api_falls_back_to_warehouse(api):
     main, client = api
     body = client.get("/predict/btcusdt").json()
