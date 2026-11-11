@@ -6,6 +6,7 @@ Covered:
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
   - Dagster definitions load and the refresh schedule is on
+  - the warehouse swap keeps views working and never blocks a reader
 
 Run:  pytest -q
 """
@@ -114,3 +115,23 @@ def test_dagster_definitions_load():
 
     assert defs.get_job_def("refresh_pipeline") is not None
     assert refresh_schedule.default_status == DefaultScheduleStatus.RUNNING
+
+
+def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    # A reader holding the old file must not block the next build, and vice versa.
+    reader = duckdb.connect(str(served), read_only=True)
+    assert materialize([lake_to_duckdb, dbt_models]).success
+    reader.close()
+
+    con = duckdb.connect(str(served), read_only=True)
+    assert con.execute("select count(*) from intermediate.int_technical_features").fetchone()[0] > 0
+    assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
+    con.close()

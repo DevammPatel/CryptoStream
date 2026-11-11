@@ -4,14 +4,18 @@ Assets (DAG):
     lake_to_duckdb  ->  dbt_models  ->  ml_model  ->  market_summary
 
 `lake_to_duckdb` loads the Parquet feature lake (written by Spark, or by the sample
-generator) into DuckDB's raw schema. dbt then builds staging/marts, the ML asset
+generator) into a fresh build copy of the warehouse. dbt builds staging/marts in that
+copy and, if every test passes, swaps it in as the served warehouse. The ML asset then
 trains + logs to MLflow, and the summary asset produces the LLM market read.
+
+The swap is why the API and dashboard never hit DuckDB's file lock: they only open the
+served file, and this pipeline only writes the build copy.
 
 Env vars:
     LAKE_URI        local folder or s3://bucket/path of the feature lake
     LAKE_ENDPOINT   S3 endpoint, needed when LAKE_URI is s3://
     LAKE_ACCESS_KEY, LAKE_SECRET_KEY
-    DUCKDB_PATH     the warehouse file
+    DUCKDB_PATH     the served warehouse file
 
 Run the UI:   dagster dev -m cryptostream_dagster.definitions
 
@@ -47,6 +51,12 @@ def served_path() -> str:
     return os.getenv("DUCKDB_PATH", os.path.join(REPO, "data", "warehouse", "crypto.duckdb"))
 
 
+def build_path() -> str:
+    """The build copy keeps the served file's name: dbt writes the name into its views."""
+    served = served_path()
+    return os.path.join(os.path.dirname(served), ".build", os.path.basename(served))
+
+
 def connect_lake_storage(con: duckdb.DuckDBPyConnection) -> None:
     """Give DuckDB credentials for an S3 lake. A local lake needs nothing."""
     if not lake_uri().startswith("s3://"):
@@ -67,11 +77,25 @@ def connect_lake_storage(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-@asset(description="Load the Parquet feature lake into DuckDB raw.ohlcv_10s.")
+def publish_warehouse() -> None:
+    """Swap the finished build copy in as the served warehouse."""
+    build = build_path()
+    con = duckdb.connect(build)
+    con.execute("CHECKPOINT;")
+    con.close()
+    os.replace(build, served_path())
+
+
+@asset(description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
 def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
-    os.makedirs(os.path.dirname(served_path()), exist_ok=True)
+    build = build_path()
+    os.makedirs(os.path.dirname(build), exist_ok=True)
+    for stale in (build, f"{build}.wal"):
+        if os.path.exists(stale):
+            os.remove(stale)
+
     parquet = f"{lake_uri()}/**/*.parquet"
-    con = duckdb.connect(served_path())
+    con = duckdb.connect(build)
     try:
         connect_lake_storage(con)
         files = con.execute("SELECT count(*) FROM glob(?)", [parquet]).fetchone()[0]
@@ -79,8 +103,7 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
             raise Exception(
                 f"No parquet found under {lake_uri()}. Run the sample generator or start the Spark job."
             )
-        con.execute("CREATE SCHEMA IF NOT EXISTS raw;")
-        con.execute("DROP TABLE IF EXISTS raw.ohlcv_10s;")
+        con.execute("CREATE SCHEMA raw;")
         # hive_partitioning recovers the symbol=... partition column from the path.
         con.execute(
             f"""
@@ -95,11 +118,12 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"rows": MetadataValue.int(int(n)), "files": int(files)})
 
 
-@asset(deps=[lake_to_duckdb], description="Run dbt build (models + tests).")
+@asset(deps=[lake_to_duckdb], description="Run dbt build (models + tests), then publish the warehouse.")
 def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     result = subprocess.run(
         ["dbt", "build", "--profiles-dir", "."],
         cwd=WAREHOUSE_DIR,
+        env=dict(os.environ, DBT_DUCKDB_PATH=build_path()),
         capture_output=True,
         text=True,
     )
@@ -107,6 +131,7 @@ def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     if result.returncode != 0:
         context.log.error(result.stderr[-3000:])
         raise Exception("dbt build failed")
+    publish_warehouse()
     return MaterializeResult(metadata={"stdout_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
 
 

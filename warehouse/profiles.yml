@@ -1,8 +1,9 @@
-# dbt profile for local DuckDB. Path is relative to the warehouse/ dir.
+# dbt profile for local DuckDB. The default path is relative to the warehouse/ dir;
+# Dagster sets DBT_DUCKDB_PATH to build a copy that it swaps in after the tests pass.
 cryptostream:
   target: dev
   outputs:
     dev:
       type: duckdb
-      path: "../data/warehouse/crypto.duckdb"
+      path: "{{ env_var('DBT_DUCKDB_PATH', '../data/warehouse/crypto.duckdb') }}"
       threads: 4
