@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import duckdb
@@ -25,10 +26,13 @@ START_PRICES = {"btcusdt": 62000.0, "ethusdt": 3400.0, "solusdt": 145.0}
 
 
 def simulate_symbol(symbol: str, start_price: float, n: int, start_ts: datetime) -> pd.DataFrame:
-    """Geometric-brownian-motion-ish 10s OHLCV bars with plausible micro-structure."""
-    rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
-    dt = 10.0 / (60 * 60 * 24)  # 10 seconds in days
-    mu, sigma = 0.05, 0.9       # annualised drift / vol
+    """Geometric-brownian-motion-ish 10s OHLCV bars with plausible micro-structure.
+
+    The seed comes from the symbol name, so every run produces the same prices.
+    """
+    rng = np.random.default_rng(zlib.crc32(symbol.encode()))
+    dt = 10.0 / (60 * 60 * 24 * 365)  # 10 seconds, in years
+    mu, sigma = 0.05, 0.5             # annualised drift / vol: about 0.03% per 10s bar, close to real BTC
     shocks = rng.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), n)
     close = start_price * np.exp(np.cumsum(shocks))
     open_ = np.concatenate([[start_price], close[:-1]])

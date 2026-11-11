@@ -3,7 +3,7 @@
 Covered:
   - ingestion.normalise maps Binance payloads to the canonical schema
   - ingestion stops cleanly on SIGTERM and gives up only on errors retrying can't fix
-  - synthetic data generation + DuckDB round-trip
+  - synthetic data generation + DuckDB round-trip, at a realistic and repeatable scale
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
   - Dagster definitions load and the refresh schedule is on
@@ -129,6 +129,26 @@ def test_sample_data_created(sample_data):
     n = con.execute("select count(*) from raw.ohlcv_10s").fetchone()[0]
     con.close()
     assert n > 500
+
+
+def test_sample_data_is_realistic_and_repeatable(tmp_path):
+    import duckdb
+    import numpy as np
+
+    closes = []
+    for run in range(2):
+        db = str(tmp_path / f"run{run}.duckdb")
+        subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"), "--minutes", "60", "--symbols", "btcusdt"],
+            check=True, cwd=REPO, env=dict(os.environ, DUCKDB_PATH=db), capture_output=True,
+        )
+        con = duckdb.connect(db, read_only=True)
+        closes.append(np.array([r[0] for r in con.execute("select close from raw.ohlcv_10s order by window_start").fetchall()]))
+        con.close()
+
+    assert np.allclose(closes[0], closes[1])  # same prices on every run
+    bar_vol = np.diff(np.log(closes[0])).std()
+    assert 0.0001 < bar_vol < 0.001  # real BTC moves roughly 0.02-0.03% per 10s bar
 
 
 def test_feature_frame(sample_data):
