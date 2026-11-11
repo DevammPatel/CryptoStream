@@ -77,27 +77,32 @@ def test_feature_frame(sample_data):
     assert not X.isnull().any().any()
 
 
-def test_training_runs(sample_data, tmp_path):
-    env = dict(os.environ, MLFLOW_TRACKING_URI=f"file://{tmp_path/'mlruns'}")
+@pytest.fixture(scope="session")
+def model_dir(tmp_path_factory):
+    return str(tmp_path_factory.mktemp("models"))
+
+
+def test_training_runs(sample_data, model_dir, tmp_path):
+    env = dict(os.environ, MODEL_DIR=model_dir, MLFLOW_TRACKING_URI=f"file://{tmp_path/'mlruns'}")
     result = subprocess.run(
         [sys.executable, os.path.join(REPO, "ml", "train.py")],
         cwd=os.path.join(REPO, "ml"), env=env, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert os.path.exists(os.path.join(REPO, "ml", "models", "direction_lgbm.pkl"))
-    assert os.path.exists(os.path.join(REPO, "ml", "models", "model_meta.json"))
+    assert os.path.exists(os.path.join(model_dir, "direction_lgbm.pkl"))
+    assert os.path.exists(os.path.join(model_dir, "model_meta.json"))
 
 
-def test_prediction_from_model(sample_data):
+def test_prediction_from_model(sample_data, model_dir):
     import json
 
     import joblib
     import numpy as np
 
-    meta = json.load(open(os.path.join(REPO, "ml", "models", "model_meta.json")))
+    meta = json.load(open(os.path.join(model_dir, "model_meta.json")))
     assert "metrics" in meta and "test_accuracy" in meta["metrics"]
 
-    payload = joblib.load(os.path.join(REPO, "ml", "models", "direction_lgbm.pkl"))
+    payload = joblib.load(os.path.join(model_dir, "direction_lgbm.pkl"))
     model, feats = payload["model"], payload["features"]
     proba = model.predict_proba(np.zeros((1, len(feats))))[:, 1][0]
     assert 0.0 <= proba <= 1.0

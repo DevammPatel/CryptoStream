@@ -38,7 +38,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 ML_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ML_DIR)
-MODEL_DIR = os.path.join(ML_DIR, "models")           # keep in sync with ml/api/main.py
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/api/main.py
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
 META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
 

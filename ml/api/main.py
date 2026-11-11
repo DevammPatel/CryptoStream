@@ -27,8 +27,9 @@ if ML_DIR not in sys.path:
 
 from features import FEATURE_COLUMNS, latest_feature_row  # noqa: E402
 
-MODEL_PATH = os.path.join(ML_DIR, "models", "direction_lgbm.pkl")
-META_PATH = os.path.join(ML_DIR, "models", "model_meta.json")
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/train.py
+MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
+META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
 
 app = FastAPI(title="CryptoStream Prediction API", version="1.0.0")
 
