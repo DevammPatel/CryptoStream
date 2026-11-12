@@ -18,6 +18,7 @@ Covered:
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
   - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
+  - rerunning the backfill over part of a day keeps the bars it doesn't cover
   - bar times stay UTC whatever the time zone of the machine reading them
   - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
   - compaction re-lists S3 instead of trusting a cached listing
@@ -548,6 +549,23 @@ def test_backfill_files_load_next_to_spark_files(sample_data, tmp_path, monkeypa
     ).fetchone()[0]
     con.close()
     assert backfilled == 6
+
+
+def test_backfill_rerun_keeps_the_rest_of_the_day(tmp_path, monkeypatch):
+    import duckdb
+    from cryptostream_dagster.backfill import bars_from_klines, write_day
+
+    monkeypatch.setenv("LAKE_URI", str(tmp_path / "lake"))
+    t0 = 1_600_000_000_000
+    con = duckdb.connect()
+    # A full run writes 6 bars; a shorter rerun covers only the last 3, with new prices.
+    write_day(con, bars_from_klines([kline(t0 + i * 1000, 100, 101, 99, 100, 1.0, 3, 0.5) for i in range(60)]),
+              "btcusdt", "2020-09-13")
+    target = write_day(con, bars_from_klines([kline(t0 + i * 1000, 200, 201, 199, 200, 1.0, 3, 0.5)
+                                              for i in range(30, 60)]), "btcusdt", "2020-09-13")
+    closes = [r[0] for r in con.execute(f"select close from read_parquet('{target}') order by window_start").fetchall()]
+    con.close()
+    assert closes == [100.0, 100.0, 100.0, 200.0, 200.0, 200.0]
 
 
 def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):
