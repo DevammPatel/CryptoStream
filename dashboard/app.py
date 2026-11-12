@@ -1,7 +1,8 @@
 """CryptoStream live dashboard (Streamlit).
 
 Shows, per symbol: price + VWAP candles, technical indicators, the ML model's
-next-move prediction (via the FastAPI service), and the LLM market summary.
+next-move prediction (via the FastAPI service), and the market summary that Dagster
+saves after each refresh.
 
 Bars come from the API's live feed and refresh every 5 seconds. When the feed isn't
 available (offline demo, or the API is down) they come from the DuckDB warehouse.
@@ -100,11 +101,28 @@ def available_symbols() -> list[str]:
     return sorted(set(load_symbols()) | set(live))
 
 
-@st.cache_data(ttl=300)  # an LLM call costs money, so never repeat it on a page refresh
-def get_summary() -> str:
-    from llm.market_agent import generate_market_summary
+@st.cache_data(ttl=30)
+def get_summary() -> dict:
+    """The summary Dagster saved after its last refresh.
 
-    return generate_market_summary()
+    The page never calls the LLM itself. Before Dagster's first run it shows the free
+    offline template instead.
+    """
+    from llm.market_agent import build_market_summary, load_saved_summary
+
+    return load_saved_summary() or {**build_market_summary(use_llm=False), "built_here": True}
+
+
+def summary_caption(record: dict) -> str:
+    if record.get("built_here"):
+        return "Offline template built by this page: Dagster hasn't saved a summary yet."
+    written = pd.Timestamp(record["generated_at"])
+    minutes = (pd.Timestamp.now(tz="UTC") - written).total_seconds() / 60
+    by = "the LLM" if record["source"] == "llm" else "the offline template"
+    note = f"Written by {by} at {written:%H:%M} UTC ({minutes:.0f} min ago); Dagster refreshes it every 15 minutes."
+    if record.get("llm_error"):
+        note += f" The LLM call failed: {record['llm_error']}"
+    return note
 
 
 @st.fragment(run_every="5s")
@@ -188,7 +206,9 @@ live_view(symbol)
 
 st.markdown("### 🧠 Market summary")
 try:
-    st.markdown(get_summary())
+    summary = get_summary()
+    st.markdown(summary["text"])
+    st.caption(summary_caption(summary))
 except Exception as exc:
     st.caption(f"Summary unavailable: {exc}")
 

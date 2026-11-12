@@ -5,6 +5,8 @@ Covered:
   - ingestion stops cleanly on SIGTERM and gives up only on errors retrying can't fix
   - synthetic data generation + DuckDB round-trip, at a realistic and repeatable scale
   - the market summary judges volatility against each symbol's own baseline
+  - the summary carries the model's calls (worded as slight leans), uses the LLM when
+    configured, falls back to the template when it fails, and round-trips through its file
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
   - CV splits never let a training label reach into the test period
@@ -170,6 +172,70 @@ def test_summary_judges_volatility_against_its_own_baseline():
     assert "normal volatility" in _describe({**row, "volatility_30": 0.0003, "typical_volatility_30": 0.0003})
 
 
+SNAPSHOT = [
+    {"symbol": "btcusdt", "as_of": "2026-11-11 22:58:00", "last_return": 0.0001, "px_vs_sma30": 0.001,
+     "volatility_30": 0.0003, "typical_volatility_30": 0.0003, "order_flow_imbalance": -0.2},
+    {"symbol": "ethusdt", "as_of": "2026-11-11 22:58:10", "last_return": -0.0002, "px_vs_sma30": 0.002,
+     "volatility_30": 0.0005, "typical_volatility_30": 0.0003, "order_flow_imbalance": -0.3},
+]
+CALLS = {"btcusdt": {"prob_up": 0.47, "as_of": "2026-11-11T22:58:00+00:00"},
+         "ethusdt": {"prob_up": 0.505, "as_of": "2026-11-11T22:58:10+00:00"}}
+MODEL_META = {"metrics": {"test_auc": 0.526}, "trained_through": "2026-11-11T22:00:00+00:00"}
+
+
+@pytest.fixture
+def market(monkeypatch):
+    from llm import market_agent
+
+    monkeypatch.setattr(market_agent, "load_snapshot", lambda: SNAPSHOT)
+    monkeypatch.setattr(market_agent, "load_model_calls", lambda symbols: (CALLS, MODEL_META))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    return market_agent
+
+
+def test_summary_reports_model_calls_without_overstating_them(market):
+    record = market.build_market_summary()
+    assert record["source"] == "template"
+    assert "BTC:" in record["text"] and "a slight lean down (P(up) 0.47" in record["text"]
+    assert "ETH:" in record["text"] and "no clear lean (P(up) 0.51" in record["text"]
+    assert "held-out AUC 0.526" in record["text"]
+    assert "tone is mixed" in record["text"]  # above their averages, but net selling
+    assert record["data_as_of"].startswith("2026-11-11T22:58:10")
+    assert record["model_trained_through"] == MODEL_META["trained_through"]
+
+
+def test_llm_summary_uses_the_same_facts_and_falls_back(market, monkeypatch, tmp_path):
+    import openai
+
+    prompts = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = self.completions = self
+
+        def create(self, **kwargs):
+            prompts.append(kwargs["messages"][0]["content"])
+            message = type("Message", (), {"content": " BTC leans slightly down. "})
+            return type("Response", (), {"choices": [type("Choice", (), {"message": message})]})
+
+    monkeypatch.setattr(openai, "OpenAI", FakeClient)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    record = market.build_market_summary()
+    assert (record["source"], record["text"]) == ("llm", "BTC leans slightly down.")
+    assert "a slight lean down (P(up) 0.47" in prompts[0] and "AUC 0.526" in prompts[0]
+
+    def quota_exceeded(self, **kwargs):
+        raise RuntimeError("quota exceeded")
+
+    monkeypatch.setattr(FakeClient, "create", quota_exceeded)
+    record = market.build_market_summary()
+    assert record["source"] == "template" and "quota exceeded" in record["llm_error"]
+
+    # saved by Dagster, read back by the dashboard
+    path = market.save_market_summary(record, str(tmp_path / "market_summary.json"))
+    assert market.load_saved_summary(path) == record
+
+
 def test_feature_frame(sample_data):
     from features import FEATURE_COLUMNS, build_xy, load_training_frame
 
@@ -299,6 +365,16 @@ def test_prediction_from_model(sample_data, model_dir):
     model, feats = payload["model"], payload["features"]
     proba = model.predict_proba(np.zeros((1, len(feats))))[:, 1][0]
     assert 0.0 <= proba <= 1.0
+
+
+def test_summary_gets_calls_from_the_served_model(sample_data, model_dir, monkeypatch):
+    from llm import market_agent
+
+    monkeypatch.setenv("MODEL_DIR", model_dir)
+    calls, meta = market_agent.load_model_calls(["btcusdt", "dogeusdt"])
+    assert list(calls) == ["btcusdt"]
+    assert 0 < calls["btcusdt"]["prob_up"] < 1
+    assert meta["trained_through"]
 
 
 def test_dagster_definitions_load():

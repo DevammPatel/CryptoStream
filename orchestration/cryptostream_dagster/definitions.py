@@ -188,15 +188,24 @@ def ml_model(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata=metadata)
 
 
-@asset(deps=[ml_model], description="Generate the LLM market summary.")
+@asset(deps=[ml_model], description="Write the market summary, with the model's calls, for the dashboard.")
 def market_summary(context: AssetExecutionContext) -> MaterializeResult:
     if REPO not in sys.path:
         sys.path.insert(0, REPO)
-    from llm.market_agent import generate_market_summary
+    from llm.market_agent import build_market_summary, save_market_summary
 
-    summary = generate_market_summary()
-    context.log.info(summary)
-    return MaterializeResult(metadata={"summary": MetadataValue.md(summary)})
+    record = build_market_summary()
+    path = save_market_summary(record)
+    context.log.info(record["text"])
+    if "llm_error" in record:
+        context.log.warning("LLM unavailable, saved the offline summary: %s", record["llm_error"])
+    return MaterializeResult(
+        metadata={
+            "summary": MetadataValue.md(record["text"]),
+            "source": MetadataValue.text(record["source"]),
+            "path": MetadataValue.path(path),
+        }
+    )
 
 
 refresh_job = define_asset_job("refresh_pipeline", selection="*")
