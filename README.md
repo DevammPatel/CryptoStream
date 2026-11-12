@@ -10,7 +10,7 @@ orchestrated by **Dagster** and fully **Dockerized**. Runs 100% free on a laptop
 > One project that credibly demonstrates **Data Engineering, Data Analytics, Data
 > Science, and AI/ML** at once.
 
-![CI](https://img.shields.io/badge/tests-passing-brightgreen) ![python](https://img.shields.io/badge/python-3.11-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+[![CI](https://github.com/DevammPatel/CryptoStream/actions/workflows/ci.yml/badge.svg)](https://github.com/DevammPatel/CryptoStream/actions/workflows/ci.yml) ![python](https://img.shields.io/badge/python-3.11-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -157,12 +157,21 @@ curl -s -X POST localhost:8000/predict \
 ## Testing & CI
 
 ```bash
-make test    # pytest: ingestion parsing, data gen, feature build, training, inference
-make lint    # ruff
+make test        # pytest: ingestion, data, dbt parity, training and promotion, API,
+                 # live track record, summary, dashboard, backfill, compaction
+make test-spark  # Spark's bar logic, inside the Spark image (needs `make up` once)
+make smoke       # end-to-end check of the running Docker stack
+make lint        # ruff
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs lint → `dbt build` (with tests) →
-pytest on every push/PR.
+GitHub Actions (`.github/workflows/ci.yml`) runs two jobs on every push to main and
+every pull request:
+
+- **Lint and tests:** ruff, `dbt build` with its tests, pytest, then the Spark tests
+  with PySpark and Java.
+- **Docker stack smoke test:** builds every image, starts the stack, and runs
+  `scripts/smoke_test.sh`: live Binance trades reach the API, six hours of history are
+  backfilled, the Dagster pipeline runs, and the API, summary and dashboard respond.
 
 ---
 
