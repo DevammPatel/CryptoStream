@@ -32,6 +32,9 @@ Binance WS ─▶ Redpanda ─▶ Spark Structured Streaming ─▶ SeaweedFS (P
 ```
 
 Full diagram, data contracts and skill-coverage table: [`docs/architecture.md`](docs/architecture.md).
+Setup and troubleshooting: [`docs/development-setup.md`](docs/development-setup.md) ·
+Ingestion: [`docs/ingestion-notes.md`](docs/ingestion-notes.md) ·
+ML layer: [`ml/README.md`](ml/README.md) · Status and known limits: [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
