@@ -14,6 +14,7 @@ Covered:
   - a new model replaces the served one only if it scores at least as well on unseen rows
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - the dashboard renders from the warehouse alone when the API is down
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
   - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
@@ -408,6 +409,27 @@ def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypat
     assert con.execute("select count(*) from intermediate.int_technical_features").fetchone()[0] > 0
     assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
     con.close()
+
+
+def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_path, monkeypatch):
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
+    monkeypatch.setenv("API_URL", "http://127.0.0.1:9")  # nothing listens: the API is down
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path / "no-model"))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    app = AppTest.from_file(os.path.join(REPO, "dashboard", "app.py"), default_timeout=60).run()
+    assert not app.exception
+    captions = [c.value for c in app.caption]
+    assert "Source: Warehouse (refreshes every 15 minutes)" in captions
+    assert [m.label for m in app.metric] == ["Last price", "vs SMA-30", "Volatility (30)", "Order-flow imbalance"]
+    assert any("Prediction service unavailable" in i.value for i in app.info)
+    # No summary saved yet, so the page builds the free template itself.
+    assert any(m.value.startswith("Market read (2 assets)") for m in app.markdown)
+    assert any("Dagster hasn't saved a summary yet" in c for c in captions)
 
 
 def lake_with_gaps(tmp_path):
