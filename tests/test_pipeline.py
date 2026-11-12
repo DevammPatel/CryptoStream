@@ -9,6 +9,7 @@ Covered:
   - model training produces a usable classifier and metadata
   - CV splits never let a training label reach into the test period
   - on data with no signal, calibrated probabilities stay near the base rate
+  - a new model replaces the served one only if it scores at least as well on unseen rows
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
   - indicators and labels are time-based, identical in dbt and Python, across gaps
@@ -226,6 +227,63 @@ def test_calibrated_model_claims_no_edge_on_noise(sample_data, model_dir):
     # the sample data is a random walk: an honest model stays close to 50/50
     assert metrics["test_prob_std"] < 0.1
     assert metrics["test_brier"] < metrics["test_brier_baseline"] + 0.01
+
+
+def test_first_training_run_is_promoted_and_recorded(sample_data, model_dir):
+    import json
+
+    with open(os.path.join(model_dir, "last_training.json")) as fh:
+        last = json.load(fh)
+    with open(os.path.join(model_dir, "model_meta.json")) as fh:
+        served = json.load(fh)
+    assert last["promotion"] == {"promoted": True, "reason": "no model served yet"}
+    assert served["trained_through"] == last["trained_through"]
+
+
+def test_a_worse_model_never_replaces_the_served_one(tmp_path):
+    import json
+
+    import joblib
+    import numpy as np
+    import pandas as pd
+    from features import FEATURE_COLUMNS
+    from sklearn.dummy import DummyClassifier
+    from sklearn.linear_model import LogisticRegression
+    from train import judge_against_served
+
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(1000, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS)
+    y = pd.Series((X["ret_1"] + 0.3 * rng.normal(size=1000) > 0).astype(int))
+    t = (1_800_000_000 + np.arange(1000) * 10) * 10**9  # 10s bars
+    model_path, meta_path = str(tmp_path / "model.pkl"), str(tmp_path / "meta.json")
+
+    def serve(model, trained_through):
+        joblib.dump({"model": model, "features": FEATURE_COLUMNS}, model_path)
+        with open(meta_path, "w") as fh:
+            json.dump({"trained_through": trained_through}, fh)
+
+    def judge(challenger_proba):
+        return judge_against_served(X, y, t, challenger_proba, model_path, meta_path)
+
+    def iso(ns):
+        return pd.Timestamp(int(ns), unit="ns", tz="UTC").isoformat()
+
+    skilled = LogisticRegression().fit(X, y)
+    guesser = DummyClassifier(strategy="prior").fit(X, y)
+
+    assert judge(np.full(1000, 0.5)) == {"promoted": True, "reason": "no model served yet"}
+
+    serve(skilled, iso(t[0] - 1))
+    verdict = judge(guesser.predict_proba(X)[:, 1])
+    assert not verdict["promoted"] and verdict["n_compared"] == 1000
+    assert verdict["challenger_brier"] > verdict["served_brier"]
+
+    serve(guesser, iso(t[0] - 1))
+    assert judge(skilled.predict_proba(X)[:, 1])["promoted"]
+
+    # Rows the served model trained on don't count, so it can't win on its own training data.
+    serve(skilled, iso(t[-100]))
+    assert judge(np.full(1000, 0.5))["reason"] == "only 99 test rows are new to the served model"
 
 
 def test_prediction_from_model(sample_data, model_dir):
@@ -623,6 +681,8 @@ def api(sample_data, model_dir, monkeypatch):
     from ml.api import main
 
     monkeypatch.setattr(main, "MODEL_PATH", os.path.join(model_dir, "direction_lgbm.pkl"))
+    monkeypatch.setattr(main, "META_PATH", os.path.join(model_dir, "model_meta.json"))
+    monkeypatch.setattr(main, "LAST_RUN_PATH", os.path.join(model_dir, "last_training.json"))
     monkeypatch.setattr(main, "live_bars", LiveBars())
     monkeypatch.setitem(main._state, "mtime", None)
     return main, TestClient(main.app)
@@ -653,6 +713,13 @@ def test_api_requires_every_feature(api):
     assert client.post("/predict", json={"ret_1": 0.001}).status_code == 422
     body = client.post("/predict", json={c: 0.1 for c in FEATURE_COLUMNS}).json()
     assert body["source"] == "request"
+
+
+def test_model_info_reports_the_latest_training_run(api):
+    main, client = api
+    info = client.get("/model/info").json()
+    assert info["promotion"]["promoted"] is True
+    assert info["last_training"]["trained_through"] == info["trained_through"]
 
 
 def test_api_falls_back_to_warehouse(api):

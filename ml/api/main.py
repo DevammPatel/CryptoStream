@@ -2,7 +2,8 @@
 
 Endpoints:
   GET  /health              liveness + whether a model is loaded
-  GET  /model/info          metrics + feature importance from the last training run
+  GET  /model/info          the served model's metrics and feature importance, plus the
+                            latest training run and whether it replaced the model
   POST /predict             predict from an explicit feature vector
   GET  /predict/{symbol}    predict from the newest finished bar for a symbol
   GET  /symbols             symbols with live bars
@@ -38,6 +39,7 @@ from live import MAX_BARS, LiveBars, consume_bars  # noqa: E402
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/train.py
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
 META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
+LAST_RUN_PATH = os.path.join(MODEL_DIR, "last_training.json")
 
 app = FastAPI(title="CryptoStream Prediction API", version="1.0.0")
 
@@ -128,7 +130,12 @@ def model_info() -> dict:
     if not os.path.exists(META_PATH):
         raise HTTPException(status_code=404, detail="No model metadata. Train the model first.")
     with open(META_PATH) as fh:
-        return json.load(fh)
+        info = json.load(fh)
+    # Training runs that didn't beat the served model are recorded here, not served.
+    if os.path.exists(LAST_RUN_PATH):
+        with open(LAST_RUN_PATH) as fh:
+            info["last_training"] = json.load(fh)
+    return info
 
 
 @app.post("/predict", response_model=Prediction)

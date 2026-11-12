@@ -25,6 +25,7 @@ Run the UI:   dagster dev -m cryptostream_dagster.definitions
 Dagster inspects the `context` annotation at runtime, so this module must not use
 `from __future__ import annotations`.
 """
+import json
 import os
 import subprocess
 import sys
@@ -161,7 +162,10 @@ def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"stdout_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
 
 
-@asset(deps=[dbt_models], description="Train the direction classifier and log to MLflow.")
+@asset(
+    deps=[dbt_models],
+    description="Train the direction classifier, log it to MLflow, and serve it if it beats the current one.",
+)
 def ml_model(context: AssetExecutionContext) -> MaterializeResult:
     result = subprocess.run(
         [sys.executable, os.path.join(REPO, "ml", "train.py")],
@@ -173,7 +177,15 @@ def ml_model(context: AssetExecutionContext) -> MaterializeResult:
     if result.returncode != 0:
         context.log.error(result.stderr[-3000:])
         raise Exception("model training failed")
-    return MaterializeResult(metadata={"log_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
+    metadata = {"log_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")}
+    last_run = os.path.join(os.getenv("MODEL_DIR", os.path.join(REPO, "ml", "models")), "last_training.json")
+    if os.path.exists(last_run):
+        with open(last_run) as fh:
+            record = json.load(fh)
+        metadata["promoted"] = MetadataValue.bool(record["promotion"]["promoted"])
+        metadata["promotion_reason"] = MetadataValue.text(record["promotion"]["reason"])
+        metadata["test_auc"] = MetadataValue.float(record["metrics"]["test_auc"] or float("nan"))
+    return MaterializeResult(metadata=metadata)
 
 
 @asset(deps=[ml_model], description="Generate the LLM market summary.")

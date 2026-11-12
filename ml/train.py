@@ -4,7 +4,9 @@
   the test period: each label looks 30s ahead.
 - LightGBM gradient-boosted trees, with probabilities calibrated on held-out data.
 - Logs params, metrics (AUC, accuracy, F1, precision/recall), feature importance,
-  and the serialised model to MLflow + a local models/ dir for the API to load.
+  and the serialised model to MLflow.
+- Replaces the model the API serves (models/ dir) only when the new one scores at
+  least as well on data neither has seen; see judge_against_served.
 
 Run:  python ml/train.py
 """
@@ -44,12 +46,15 @@ ML_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ML_DIR)
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/api/main.py
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
-META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
+META_PATH = os.path.join(MODEL_DIR, "model_meta.json")  # the served model
+LAST_RUN_PATH = os.path.join(MODEL_DIR, "last_training.json")  # the latest run, promoted or not
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", f"file://{os.path.join(REPO, 'mlruns')}")
 EXPERIMENT = "cryptostream-direction"
 
 HORIZON_NS = 30 * 10**9  # how far ahead the label looks (mart_ml_features.sql)
+MIN_COMPARE_ROWS = 200  # fewer unseen test rows than this can't fairly rank two models
+REGISTERED_MODEL = "cryptostream-direction"
 
 
 def epoch_ns(times: pd.Series) -> np.ndarray:
@@ -67,6 +72,59 @@ def purged_splits(t: np.ndarray, n_splits: int = 5):
     for _, test_idx in TimeSeriesSplit(n_splits=n_splits).split(clock):
         start, end = clock[test_idx[0]], clock[test_idx[-1]]
         yield np.flatnonzero(t + HORIZON_NS < start), np.flatnonzero((t >= start) & (t <= end))
+
+
+def judge_against_served(
+    X: pd.DataFrame,
+    y: pd.Series,
+    t: np.ndarray,
+    challenger_proba: np.ndarray,
+    model_path: str = MODEL_PATH,
+    meta_path: str = META_PATH,
+) -> dict:
+    """Decide whether the new model replaces the one the API serves.
+
+    Both models are scored (Brier, lower is better) on the test rows that come after
+    everything the served model saw in training, so neither has seen them. The new model
+    must do at least as well. It is promoted without a contest when there is no served
+    model, the served one can't be loaded or uses other features, or too few rows are
+    new to it to judge.
+    """
+
+    def verdict(promoted: bool, reason: str, **scores) -> dict:
+        return {"promoted": promoted, "reason": reason, **scores}
+
+    if not os.path.exists(model_path):
+        return verdict(True, "no model served yet")
+    try:
+        payload = joblib.load(model_path)
+        with open(meta_path) as fh:
+            served_through = json.load(fh).get("trained_through")
+    except Exception as exc:  # missing metadata, or saved by an incompatible version
+        return verdict(True, f"served model could not be loaded ({type(exc).__name__})")
+    if payload.get("features") != FEATURE_COLUMNS:
+        return verdict(True, "served model uses different features")
+    if served_through is None:
+        return verdict(True, "served model has no recorded training cutoff")
+
+    unseen = t > epoch_ns(pd.Series([served_through]))[0]
+    if unseen.sum() < MIN_COMPARE_ROWS or y[unseen].nunique() < 2:
+        return verdict(True, f"only {int(unseen.sum())} test rows are new to the served model")
+    scores = {
+        "served_brier": float(brier_score_loss(y[unseen], payload["model"].predict_proba(X[unseen])[:, 1])),
+        "challenger_brier": float(brier_score_loss(y[unseen], challenger_proba[unseen])),
+        "n_compared": int(unseen.sum()),
+    }
+    if scores["challenger_brier"] <= scores["served_brier"]:
+        return verdict(True, "scores at least as well as the served model", **scores)
+    return verdict(False, "scores worse than the served model", **scores)
+
+
+def write_json(path: str, data: dict) -> None:
+    """Write then rename, so a reader never sees half a file."""
+    with open(f"{path}.tmp", "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(f"{path}.tmp", path)
 
 
 def main() -> None:
@@ -150,34 +208,60 @@ def main() -> None:
     }
 
     importance = dict(zip(FEATURE_COLUMNS, (int(v) for v in model.feature_importances_)))
+    promotion = judge_against_served(X[test], y_te, t[test], proba)
+    # The served model has seen every price up to here (its last labels look 30s ahead).
+    trained_through = pd.Timestamp(int(t[fit | cal].max()) + HORIZON_NS, unit="ns", tz="UTC")
 
     run_id = None
     if _HAS_MLFLOW:
         with mlflow.start_run() as run:
             mlflow.log_params(params)
             mlflow.log_metrics({k: v for k, v in metrics.items() if isinstance(v, float) and not np.isnan(v)})
+            mlflow.log_metrics({k: v for k, v in promotion.items() if k.endswith("_brier")})
+            mlflow.set_tags({"promoted": str(promotion["promoted"]).lower(), "promotion_reason": promotion["reason"]})
             mlflow.log_dict(importance, "feature_importance.json")
             flavor = mlflow.lightgbm if served is model else mlflow.sklearn
+            # Only promoted models become registry versions; the newest one is "champion".
+            name = REGISTERED_MODEL if promotion["promoted"] else None
             try:
-                flavor.log_model(served, artifact_path="model", registered_model_name="cryptostream-direction")
-            except Exception:  # registry may be unavailable with file store
-                flavor.log_model(served, artifact_path="model")
+                info = flavor.log_model(served, artifact_path="model", registered_model_name=name)
+            except Exception:  # registry unavailable
+                info = flavor.log_model(served, artifact_path="model")
+            if info.registered_model_version is not None:
+                try:
+                    mlflow.MlflowClient().set_registered_model_alias(
+                        REGISTERED_MODEL, "champion", str(info.registered_model_version)
+                    )
+                except Exception as exc:
+                    print(f"  (could not set the champion alias: {exc})")
             run_id = run.info.run_id
     else:
         print("  (mlflow not installed — skipping experiment logging)")
 
-    # Write then rename, so the API can never load a half-written file.
-    joblib.dump({"model": served, "features": FEATURE_COLUMNS}, f"{MODEL_PATH}.tmp")
-    os.replace(f"{MODEL_PATH}.tmp", MODEL_PATH)
-    # NaN isn't valid JSON, and /model/info would fail to serve it.
-    stored = {k: None if isinstance(v, float) and np.isnan(v) else v for k, v in metrics.items()}
-    with open(f"{META_PATH}.tmp", "w") as fh:
-        json.dump({"metrics": stored, "feature_importance": importance, "mlflow_run_id": run_id}, fh, indent=2)
-    os.replace(f"{META_PATH}.tmp", META_PATH)
+    record = {
+        # NaN isn't valid JSON, and /model/info would fail to serve it.
+        "metrics": {k: None if isinstance(v, float) and np.isnan(v) else v for k, v in metrics.items()},
+        "feature_importance": importance,
+        "mlflow_run_id": run_id,
+        "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "trained_through": trained_through.isoformat(),
+        "promotion": promotion,
+    }
+    write_json(LAST_RUN_PATH, record)
+    if promotion["promoted"]:
+        # Write then rename, so the API can never load a half-written file.
+        joblib.dump({"model": served, "features": FEATURE_COLUMNS}, f"{MODEL_PATH}.tmp")
+        os.replace(f"{MODEL_PATH}.tmp", MODEL_PATH)
+        write_json(META_PATH, record)
 
     print("=== Training complete ===")
     for k, v in metrics.items():
-        print(f"  {k:16s}: {v}")
+        print(f"  {k:24s}: {v}")
+    verdict = "promoted" if promotion["promoted"] else "kept the served model"
+    print(f"  {verdict}: {promotion['reason']}")
+    for k in ("challenger_brier", "served_brier", "n_compared"):
+        if k in promotion:
+            print(f"    {k:22s}: {promotion[k]}")
     print(f"  model  -> {MODEL_PATH}")
     if _HAS_MLFLOW:
         print(f"  mlflow -> {MLFLOW_TRACKING_URI} (run {run_id})")
