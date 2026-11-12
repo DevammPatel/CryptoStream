@@ -749,6 +749,25 @@ def test_track_record_counts_only_unseen_bars_and_settles_them_later():
     assert card.summary(symbol="ethusdt") == {"n": 0, "pending": 0}
 
 
+def test_track_record_voids_calls_whose_next_bar_never_comes():
+    import time
+
+    from features import FEATURE_COLUMNS
+    from monitor import Scorecard
+
+    now = int(time.time() * 1000)
+    bars = make_bars(60, now - 2_000)
+    gap = {bars[45]["window_start"], bars[46]["window_start"], bars[47]["window_start"]}
+    store = filled_store([b for b in bars if b["window_start"] not in gap])
+    card = Scorecard()
+    card.step(store, ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now)
+    card.step(store, ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now + 5_000)
+    # Calls start at bar 30 (31 bars of history). Bars 30-41 and 49-56 settle. Bars
+    # 42-44 lose their bar at +30s to the gap, so they are void: neither scored nor
+    # pending. Bar 48 has no return across the gap, so no call. Bars 57-59 still wait.
+    assert card.summary("model-a") == {**card.summary("model-a"), "n": 12 + 8, "pending": 3}
+
+
 def test_api_reports_the_live_track_record(api):
     import time
 

@@ -1,7 +1,9 @@
 """Live track record: how the served model does on bars it has never seen.
 
 Every finished live bar gets one prediction from the model being served. Thirty
-seconds later the bar at +30s settles it: did the close go up? Only bars newer than
+seconds later the bar at +30s settles it: did the close go up? If that bar never
+comes (a gap in the feed), the call is void, just as training gives such a row no
+label. Only bars newer than
 everything the model trained on count (its trained_through), so the record is out of
 sample by construction. The API serves the totals at /model/live and the dashboard
 shows them next to the model's call.
@@ -43,7 +45,7 @@ class Scorecard:
     def __init__(self, keep_ms: int = KEEP_MS) -> None:
         self.keep_ms = keep_ms
         self._lock = threading.Lock()
-        # symbol -> window_start (ms) -> {prob_up, close, outcome, model_id}
+        # symbol -> window_start (ms) -> {prob_up, close, outcome, void, model_id}
         self._records: dict[str, dict[int, dict]] = {}
 
     def step(
@@ -62,11 +64,16 @@ class Scorecard:
                 continue
             finished = df[df["window_end"] + GRACE_MS <= now_ms].reset_index(drop=True)
             closes = dict(zip(finished["window_start"].astype("int64"), finished["close"]))
+            newest = max(closes, default=None)
             with self._lock:
                 records = self._records.setdefault(symbol, {})
                 for start, record in records.items():
-                    if record["outcome"] is None and start + HORIZON_MS in closes:
+                    if record["outcome"] is not None or record["void"]:
+                        continue
+                    if start + HORIZON_MS in closes:
                         record["outcome"] = int(closes[start + HORIZON_MS] > record["close"])
+                    elif newest is not None and newest > start + HORIZON_MS:
+                        record["void"] = True  # later bars finished, but not the one at +30s
                 seen = set(records)
             if model is None:
                 continue
@@ -85,6 +92,7 @@ class Scorecard:
                         "prob_up": float(p),
                         "close": float(close),
                         "outcome": None if later is None else int(later > close),
+                        "void": later is None and newest is not None and newest > start + HORIZON_MS,
                         "model_id": model_id,
                     }
         self._prune(now_ms)
@@ -106,10 +114,11 @@ class Scorecard:
                 if model_id is None or r["model_id"] == model_id
             ]
         settled = [r for r in records if r["outcome"] is not None]
+        pending = sum(1 for r in records if r["outcome"] is None and not r["void"])
         stats = settle_stats(
             np.array([r["prob_up"] for r in settled]), np.array([r["outcome"] for r in settled])
         )
-        return {**stats, "pending": len(records) - len(settled)}
+        return {**stats, "pending": pending}
 
 
 def epoch_ms(iso: str | None) -> int | None:
