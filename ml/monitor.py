@@ -3,16 +3,17 @@
 Every finished live bar gets one prediction from the model being served. Thirty
 seconds later the bar at +30s settles it: did the close go up? If that bar never
 comes (a gap in the feed), the call is void, just as training gives such a row no
-label. Only bars newer than
-everything the model trained on count (its trained_through), so the record is out of
-sample by construction. The API serves the totals at /model/live and the dashboard
-shows them next to the model's call.
+label. Only bars newer than everything the model trained on count (its
+trained_through), so the record is out of sample by construction. The API serves the
+totals at /model/live and the dashboard shows them next to the model's call.
 
-Records are kept in memory for 24 hours. After an API restart the bars topic is
-replayed (one hour of retention), so the last hour is scored again.
+Records are kept for 24 hours. The API saves them to a file every minute and loads it
+on startup, so a restart or a new image keeps the history.
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 
 import numpy as np
@@ -96,6 +97,33 @@ class Scorecard:
                         "model_id": model_id,
                     }
         self._prune(now_ms)
+
+    def save(self, path: str) -> None:
+        """Write every record to a JSON file (write then rename)."""
+        with self._lock:
+            data = {sym: {str(start): dict(r) for start, r in by_start.items()} for sym, by_start in self._records.items()}
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+
+    def load(self, path: str, now_ms: int) -> int:
+        """Add the records an earlier run saved, except those past keep_ms. Returns how many."""
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):  # no file yet, or a damaged one: start afresh
+            return 0
+        oldest = now_ms - self.keep_ms
+        added = 0
+        with self._lock:
+            for symbol, by_start in data.items():
+                records = self._records.setdefault(symbol, {})
+                for start, record in by_start.items():
+                    if int(start) >= oldest and int(start) not in records:
+                        records[int(start)] = record
+                        added += 1
+        return added
 
     def _prune(self, now_ms: int) -> None:
         with self._lock:

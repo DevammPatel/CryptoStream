@@ -11,7 +11,8 @@
    API predicts from bars seconds old instead of the 15-minute warehouse.
 4. **The promised features.** A promotion gate keeps a worse model from replacing the
    served one; the market summary includes the model's calls and is written once per
-   refresh; the API keeps a live track record on bars the model never trained on.
+   refresh; the API keeps a live track record on bars the model never trained on,
+   saved across restarts.
 5. **Trustworthy results.** Time-based windows and labels, one bar per window, plain
    UTC, open and close by trade time, purged and calibrated training with baselines, a
    real-history backfill, and lake compaction with retention.
@@ -21,8 +22,6 @@
 
 ## Known limits
 
-- **The live track record is kept in memory.** An API restart keeps only what the
-  one-hour bars topic can replay. Saving it to the lake would keep a longer history.
 - **Spark's live query saves progress to S3 every 2 seconds.** Each 2-second batch takes
   about 3 seconds, so live bars arrive about a second later than planned. A local
   checkpoint volume would remove most of that.

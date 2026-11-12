@@ -25,7 +25,8 @@ Covered:
   - compaction re-lists S3 instead of trusting a cached listing
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars, /model/info
-  - live track record: only bars newer than the model's training data, settled 30s later
+  - live track record: only bars newer than the model's training data, settled 30s later,
+    void across gaps, and kept across a restart
 
 Run:  pytest -q
 """
@@ -810,6 +811,26 @@ def test_track_record_voids_calls_whose_next_bar_never_comes():
     assert card.summary("model-a") == {**card.summary("model-a"), "n": 12 + 8, "pending": 3}
 
 
+def test_track_record_survives_a_restart(tmp_path):
+    import time
+
+    from features import FEATURE_COLUMNS
+    from monitor import KEEP_MS, Scorecard
+
+    now = int(time.time() * 1000)
+    card = Scorecard()
+    card.step(filled_store(make_bars(80, now - 2_000)), ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now)
+    path = str(tmp_path / "live_track_record.json")
+    card.save(path)
+
+    restarted = Scorecard()
+    assert restarted.load(path, now) == 49
+    assert restarted.summary("model-a") == card.summary("model-a")
+    assert Scorecard().load(path, now + KEEP_MS + 10 * 60_000) == 0  # all past the 24 hours
+    (tmp_path / "damaged.json").write_text("{not json")
+    assert Scorecard().load(str(tmp_path / "damaged.json"), now) == 0
+
+
 def test_api_reports_the_live_track_record(api):
     import time
 
@@ -923,6 +944,7 @@ def api(sample_data, model_dir, monkeypatch):
     monkeypatch.setattr(main, "MODEL_PATH", os.path.join(model_dir, "direction_lgbm.pkl"))
     monkeypatch.setattr(main, "META_PATH", os.path.join(model_dir, "model_meta.json"))
     monkeypatch.setattr(main, "LAST_RUN_PATH", os.path.join(model_dir, "last_training.json"))
+    monkeypatch.setattr(main, "TRACK_PATH", os.path.join(model_dir, "live_track_record.json"))
     monkeypatch.setattr(main, "live_bars", LiveBars())
     monkeypatch.setitem(main._state, "mtime", None)
     return main, TestClient(main.app)

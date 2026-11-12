@@ -33,6 +33,7 @@ over guessing, reported next to baselines in every run. See the main README.
 | `direction_lgbm.pkl` | the served model and its feature list |
 | `model_meta.json` | the served model's metrics, feature importance, `trained_through` and promotion verdict |
 | `last_training.json` | the same for the latest run, promoted or not |
+| `live_track_record.json` | the API's live track record, saved every minute |
 
 None of these are tracked in git; `make train` or the Dagster pipeline creates them.
 

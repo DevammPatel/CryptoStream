@@ -45,6 +45,7 @@ MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sy
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
 META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
 LAST_RUN_PATH = os.path.join(MODEL_DIR, "last_training.json")
+TRACK_PATH = os.path.join(MODEL_DIR, "live_track_record.json")
 
 app = FastAPI(title="CryptoStream Prediction API", version="1.0.0")
 
@@ -100,19 +101,34 @@ def _score_once(now_ms: int | None = None) -> None:
 
 
 REPLAY_WAIT_S = 30  # the startup replay of the bars topic takes a second or two
+SAVE_EVERY_S = 60
+
+
+def _save_track_record() -> None:
+    try:
+        scorecard.save(TRACK_PATH)
+    except OSError:
+        log.exception("live track record: could not save %s", TRACK_PATH)
 
 
 def _score_live_bars(stop: threading.Event) -> None:
+    loaded = scorecard.load(TRACK_PATH, int(time.time() * 1000))
+    log.info("live track record: loaded %d earlier calls from %s", loaded, TRACK_PATH)
     # Let the consumer finish replaying the bars topic first: mid-replay, a bar may only
     # have one of its early, partial updates, and it would be scored on that.
     if stop.wait(REPLAY_WAIT_S):
         return
+    last_save = time.monotonic()
     while True:
         try:
             _score_once()
         except Exception:  # keep scoring after a bad batch
             log.exception("live track record: scoring failed")
+        if time.monotonic() - last_save >= SAVE_EVERY_S:
+            _save_track_record()
+            last_save = time.monotonic()
         if stop.wait(5):
+            _save_track_record()
             return
 
 
