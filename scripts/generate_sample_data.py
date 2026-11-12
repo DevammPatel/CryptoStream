@@ -20,7 +20,8 @@ import pandas as pd
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(HERE, "data")
-LAKE_DIR = os.path.join(DATA_DIR, "lake", "features", "ohlcv_10s")
+# The same setting Dagster reads the lake from (definitions.lake_uri).
+LAKE_DIR = os.getenv("LAKE_URI", os.path.join(DATA_DIR, "lake", "features", "ohlcv_10s"))
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", os.path.join(DATA_DIR, "warehouse", "crypto.duckdb"))
 
 START_PRICES = {"btcusdt": 62000.0, "ethusdt": 3400.0, "solusdt": 145.0}
@@ -78,6 +79,8 @@ def main() -> None:
     # Plain UTC timestamps, like the ones Spark and the backfill write.
     start_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=args.minutes)
 
+    if "://" in LAKE_DIR:
+        raise SystemExit(f"The sample generator writes a local lake, but LAKE_URI is {LAKE_DIR}. Unset it or use a folder.")
     os.makedirs(LAKE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)
 

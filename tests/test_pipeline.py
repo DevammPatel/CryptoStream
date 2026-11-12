@@ -125,8 +125,11 @@ def test_ingestion_stops_cleanly_on_sigterm(tmp_path):
 
 @pytest.fixture(scope="session")
 def sample_data(tmp_path_factory):
+    # Everything goes to temporary folders, never to the repo's own data/ (the generator
+    # replaces whole symbol folders, which would wipe a developer's backfilled lake).
     db_path = str(tmp_path_factory.mktemp("wh") / "crypto.duckdb")
     os.environ["DUCKDB_PATH"] = db_path
+    os.environ["LAKE_URI"] = str(tmp_path_factory.mktemp("lake") / "features" / "ohlcv_10s")
     subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"),
          "--minutes", "120", "--symbols", "btcusdt,ethusdt"],
@@ -153,7 +156,8 @@ def test_sample_data_is_realistic_and_repeatable(tmp_path):
         db = str(tmp_path / f"run{run}.duckdb")
         subprocess.run(
             [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"), "--minutes", "60", "--symbols", "btcusdt"],
-            check=True, cwd=REPO, env=dict(os.environ, DUCKDB_PATH=db), capture_output=True,
+            check=True, cwd=REPO, capture_output=True,
+            env=dict(os.environ, DUCKDB_PATH=db, LAKE_URI=str(tmp_path / f"lake{run}")),
         )
         con = duckdb.connect(db, read_only=True)
         closes.append(np.array([r[0] for r in con.execute("select close from raw.ohlcv_10s order by window_start").fetchall()]))
@@ -414,7 +418,7 @@ def lake_with_gaps(tmp_path):
     import numpy as np
     import pandas as pd
 
-    files = glob.glob(os.path.join(REPO, "data", "lake", "features", "ohlcv_10s", "symbol=btcusdt", "*.parquet"))
+    files = glob.glob(os.path.join(os.environ["LAKE_URI"], "symbol=btcusdt", "*.parquet"))  # the sample lake
     bars = pd.concat([pd.read_parquet(f) for f in files]).sort_values("window_start").reset_index(drop=True)
     keep = np.ones(len(bars), dtype=bool)
     keep[100:105] = False
