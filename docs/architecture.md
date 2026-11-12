@@ -154,8 +154,10 @@ new one earns its place:
 5. **Track live.** `ml/monitor.py` gives every finished live bar newer than
    `trained_through` a call from the served model, and settles it when the bar 30s
    later finishes. `/model/live` reports the hit rate and Brier score next to the best
-   constant guess in hindsight, for the current model and for the last 24 hours. It is
-   kept in memory; a restart rescores the hour of bars Kafka still holds.
+   constant guess in hindsight, for the current model and for the last 24 hours across
+   every served model. The dashboard shows the 24-hour figure, because every retrain
+   that ties or wins starts the current model's record from zero. It is kept in
+   memory; a restart rescores the hour of bars Kafka still holds.
 
 ## Market summary
 

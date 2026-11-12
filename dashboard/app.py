@@ -165,10 +165,12 @@ def live_view(symbol: str) -> None:
         if pred.get("as_of"):
             age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(pred["as_of"])).total_seconds()
             st.caption(f"Based on the {pred['source']} bar from {age:.0f}s ago")
-        track = (api_get("/model/live") or {}).get("current_model", {})
+        # Retraining replaces the model often, so show the last 24 hours across every
+        # served model: each call was still made on a bar its model never trained on.
+        track = (api_get("/model/live") or {}).get("last_24h_all_models", {})
         if track.get("n"):
             st.caption(
-                f"Live track record of this model: {track['n']:,} calls on bars it never trained on, "
+                f"Live track record, last 24h: {track['n']:,} calls on bars the model had never seen, "
                 f"right {track['hit_rate']:.1%} of the time (always calling the more common side: "
                 f"{track['hit_rate_baseline']:.1%}); Brier {track['brier']:.4f} vs {track['brier_baseline']:.4f}."
             )
