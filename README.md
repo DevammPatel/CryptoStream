@@ -17,18 +17,17 @@ orchestrated by **Dagster** and fully **Dockerized**. Runs 100% free on a laptop
 ## Architecture
 
 ```
-                                    ┌─▶ Kafka live bars ─▶ FastAPI + dashboard (seconds)
-Binance WS ─▶ Redpanda ─▶ Spark Structured Streaming ─▶ SeaweedFS (Parquet lake)
-                                                              │
-                                       Dagster ──────────────┤
-                                          │                   ▼
-                                          ├──▶ dbt ──▶ DuckDB (staging→marts)
-                                          ├──▶ LightGBM trainer ──▶ MLflow
-                                          └──▶ LLM summary agent
-                                                     │
-                              FastAPI /predict ◀─────┤
-                                                     ▼
-                                            Streamlit dashboard
+Binance WS ─▶ ingestion ─▶ Redpanda ─▶ Spark ─┬─▶ Kafka live bars ──────▶ FastAPI ──▶ Streamlit
+                                              │                           ▲   ▲       dashboard
+                                              ▼                           │   │           ▲
+                                   SeaweedFS Parquet lake                 │   │           │
+                                              │                           │   │           │
+                       Dagster, every 15 min  ▼                           │   │           │
+                         compact, load, dbt ─▶ DuckDB ────────────────────┘   │           │
+                                              │      (warehouse fallback)     │           │
+                                              ├─▶ train ─▶ promotion gate ────┘           │
+                                              │      └─▶ MLflow                           │
+                                              └─▶ market summary (template or LLM) ───────┘
 ```
 
 Full diagram, data contracts and skill-coverage table: [`docs/architecture.md`](docs/architecture.md).
