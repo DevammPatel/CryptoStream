@@ -249,10 +249,11 @@ def main() -> None:
     }
     write_json(LAST_RUN_PATH, record)
     if promotion["promoted"]:
+        # Metadata first: the API reloads when the model file changes, and then reads it.
+        write_json(META_PATH, record)
         # Write then rename, so the API can never load a half-written file.
         joblib.dump({"model": served, "features": FEATURE_COLUMNS}, f"{MODEL_PATH}.tmp")
         os.replace(f"{MODEL_PATH}.tmp", MODEL_PATH)
-        write_json(META_PATH, record)
 
     print("=== Training complete ===")
     for k, v in metrics.items():

@@ -21,7 +21,8 @@ Covered:
   - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
   - compaction re-lists S3 instead of trusting a cached listing
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
-  - API: predictions from live bars, warehouse fallback, /bars
+  - API: predictions from live bars, warehouse fallback, /bars, /model/info
+  - live track record: only bars newer than the model's training data, settled 30s later
 
 Run:  pytest -q
 """
@@ -661,6 +662,64 @@ def filled_store(bars):
     for bar in bars:
         store.update(bar)
     return store
+
+
+class ConstantModel:
+    """Always gives the same P(up)."""
+
+    def __init__(self, prob_up):
+        self.prob_up = prob_up
+
+    def predict_proba(self, X):
+        import numpy as np
+
+        return np.column_stack([np.full(len(X), 1 - self.prob_up), np.full(len(X), self.prob_up)])
+
+
+def test_track_record_counts_only_unseen_bars_and_settles_them_later():
+    import time
+
+    from features import FEATURE_COLUMNS
+    from monitor import Scorecard
+
+    now = int(time.time() * 1000)
+    bars = make_bars(80, now - 2_000)  # rising prices: every settled call's outcome is "up"
+    store = filled_store(bars)
+    card = Scorecard()
+
+    # 79 bars are finished; the first 29 lack the history a call needs; the last 3
+    # calls wait for their bar 30s later.
+    card.step(store, ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now)
+    assert card.summary("model-a") == {
+        "n": 46, "hit_rate": 1.0, "hit_rate_baseline": 1.0, "brier": pytest.approx(0.16),
+        "brier_baseline": 0.0, "up_rate": 1.0, "pending": 3,
+    }
+
+    # Calls settle as later bars finish, and a new model only scores bars it never saw.
+    for bar in make_bars(3, now + 28_000)[-3:]:
+        store.update({**bar, "close": 200.0})
+    trained_through = bars[60]["window_start"]
+    card.step(store, ConstantModel(0.4), FEATURE_COLUMNS, "model-b", trained_through, now + 30_000)
+    assert card.summary("model-a")["n"] == 49 and card.summary("model-a")["pending"] == 0
+    assert card.summary("model-b") == {**card.summary("model-b"), "n": 0, "pending": 3}
+    assert card.summary(symbol="ethusdt") == {"n": 0, "pending": 0}
+
+
+def test_api_reports_the_live_track_record(api):
+    import time
+
+    main, client = api
+    main._load_model()
+    now, cutoff = int(time.time() * 1000), main._state["trained_through_ms"]
+    for bar in make_bars(60, now - 2_000) + make_bars(60, cutoff, symbol="ethusdt"):
+        main.live_bars.update(bar)
+    main._score_once(now)
+
+    body = client.get("/model/live").json()
+    assert body["model_id"] and body["counts_bars_after"]
+    assert body["current_model"]["n"] == 26 and body["current_model"]["pending"] == 3
+    # bars from before the end of the model's training data never count
+    assert body["by_symbol"]["ethusdt"] == {"n": 0, "pending": 0}
 
 
 def test_live_features_match_warehouse(sample_data, tmp_path, monkeypatch):

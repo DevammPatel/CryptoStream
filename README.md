@@ -118,8 +118,14 @@ make backfill     # optional: load 7 days of real history (about 3 minutes) so t
 - **`ml/train.py`** — LightGBM classifier with walk-forward CV, purged so no training
   label reaches into the test period, and probabilities calibrated on held-out data;
   logs params, metrics against simple baselines, feature importance and the model to MLflow.
-- **`ml/api/main.py`** — FastAPI service that hot-reloads the latest model and exposes
-  `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`, `/health`.
+  A new model replaces the served one only if it scores at least as well on data
+  neither has trained on.
+- **`ml/api/main.py`** — FastAPI service that hot-reloads the served model and exposes
+  `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`,
+  `/model/live`, `/health`.
+- **`ml/monitor.py`** — the live track record: every finished live bar gets a call from
+  the served model, settled 30 seconds later, counting only bars newer than its
+  training data. Served at `/model/live` and shown on the dashboard.
 - **`ml/live.py`** — keeps recent bars from Kafka in memory and computes the same
   indicators as dbt, so predictions use data seconds old, not the 15-minute warehouse.
 - **`llm/market_agent.py`** — turns the latest snapshot and the model's call on each
