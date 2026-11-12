@@ -71,6 +71,9 @@ make api         # FastAPI at http://localhost:8000  (docs at /docs)
 make dashboard   # Streamlit at http://localhost:8501
 ```
 
+The local `make` targets read `.env` when it exists, the same way Docker Compose does
+(copy `.env.example` to start one).
+
 To use real market history instead of synthetic bars (needs internet, no Docker):
 
 ```bash
