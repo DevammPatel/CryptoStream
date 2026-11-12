@@ -88,25 +88,32 @@ def _load_model() -> None:
 def _score_once(now_ms: int | None = None) -> None:
     """Add the newest finished live bars to the track record, and settle older calls."""
     _load_model()
+    with _model_lock:  # one consistent model, even if a reload lands meanwhile
+        model, features = _state["model"], _state["features"]
+        model_id, trained_through_ms = _state["model_id"], _state["trained_through_ms"]
     # A model with no recorded training cutoff might be scored on its own training
     # data, so it gets no track record.
-    model = _state["model"] if _state["trained_through_ms"] is not None else None
-    scorecard.step(
-        live_bars,
-        model,
-        _state["features"],
-        _state["model_id"],
-        _state["trained_through_ms"],
-        int(time.time() * 1000) if now_ms is None else now_ms,
-    )
+    if trained_through_ms is None:
+        model = None
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    scorecard.step(live_bars, model, features, model_id, trained_through_ms, now_ms)
+
+
+REPLAY_WAIT_S = 30  # the startup replay of the bars topic takes a second or two
 
 
 def _score_live_bars(stop: threading.Event) -> None:
-    while not stop.wait(5):
+    # Let the consumer finish replaying the bars topic first: mid-replay, a bar may only
+    # have one of its early, partial updates, and it would be scored on that.
+    if stop.wait(REPLAY_WAIT_S):
+        return
+    while True:
         try:
             _score_once()
         except Exception:  # keep scoring after a bad batch
             log.exception("live track record: scoring failed")
+        if stop.wait(5):
+            return
 
 
 @app.on_event("startup")
