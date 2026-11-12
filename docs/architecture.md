@@ -221,5 +221,7 @@ otherwise skip the new batches). They then rebuild from the trades Kafka still h
 the overlap with bars already in the lake is removed by staging's deduplication.
 
 DuckDB locks a file against other processes, so Dagster never writes the served file.
-It builds a copy in `.build/` and renames it over the served file after dbt's tests
-pass. A failed build leaves the last good warehouse in place.
+Each run builds its own copy in `.build/<run id>/` and renames it over the served file
+after dbt's tests pass. A failed build leaves the last good warehouse in place, and a
+scheduled run that overlaps a manual one doesn't collide with it. Compaction is the one
+step that runs alone: a run that finds another compacting skips it.

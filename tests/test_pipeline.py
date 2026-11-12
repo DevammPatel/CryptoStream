@@ -14,6 +14,7 @@ Covered:
   - a new model replaces the served one only if it scores at least as well on unseen rows
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - overlapping pipeline runs build separate warehouse copies, and only one compacts
   - the dashboard renders from the warehouse alone when the API is down
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
@@ -433,6 +434,30 @@ def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_p
     assert any("Dagster hasn't saved a summary yet" in c for c in captions)
 
 
+def test_overlapping_runs_build_their_own_warehouse_copy(sample_data, tmp_path, monkeypatch):
+    """A scheduled run and a manual one can overlap; each builds its own copy."""
+    import threading
+
+    import duckdb
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    results = []
+    runs = [threading.Thread(target=lambda: results.append(materialize([lake_to_duckdb, dbt_models]).success))
+            for _ in range(2)]
+    for run in runs:
+        run.start()
+    for run in runs:
+        run.join()
+    assert results == [True, True]
+    assert list((tmp_path / ".build").iterdir()) == []  # each published run removed its folder
+    con = duckdb.connect(str(served), read_only=True)
+    assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
+    con.close()
+
+
 def lake_with_gaps(tmp_path):
     """The btcusdt sample bars with a 50s outage, every 17th bar missing, and a few bars
     written twice: a partial copy, as Spark leaves when it replays a batch."""
@@ -660,6 +685,23 @@ def test_compaction_merges_finished_hours_and_expires_old_trades(tmp_path):
     trade_files = sorted(p.name for p in trades.iterdir())
     assert trade_files == ["compact-2026111113.parquet"]
     con.close()
+
+
+def test_compaction_skips_while_another_run_compacts(tmp_path):
+    from datetime import datetime, timezone
+
+    import duckdb
+    from cryptostream_dagster.compaction import compact_lake, compaction_lock
+
+    now = datetime(2026, 11, 11, 15, 25, tzinfo=timezone.utc)
+    root, feats, trades, bars = spark_lake(tmp_path, now)
+    uri = str(root / "features" / "ohlcv_10s")
+    before = sorted(p.name for p in feats.iterdir())
+    with compaction_lock(uri) as mine:
+        assert mine
+        summary = compact_lake(duckdb.connect(), uri, now=now)
+    assert summary == {"skipped": "another run is compacting the lake"}
+    assert sorted(p.name for p in feats.iterdir()) == before
 
 
 def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):
