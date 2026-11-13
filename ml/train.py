@@ -121,10 +121,12 @@ def judge_against_served(
 
 
 def write_json(path: str, data: dict) -> None:
-    """Write then rename, so a reader never sees half a file."""
-    with open(f"{path}.tmp", "w") as fh:
+    """Write then rename, so a reader never sees half a file. The temporary name is
+    unique, so two training runs at once can't mix their writes."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
         json.dump(data, fh, indent=2)
-    os.replace(f"{path}.tmp", path)
+    os.replace(tmp, path)
 
 
 def main() -> None:
@@ -252,8 +254,9 @@ def main() -> None:
         # Metadata first: the API reloads when the model file changes, and then reads it.
         write_json(META_PATH, record)
         # Write then rename, so the API can never load a half-written file.
-        joblib.dump({"model": served, "features": FEATURE_COLUMNS}, f"{MODEL_PATH}.tmp")
-        os.replace(f"{MODEL_PATH}.tmp", MODEL_PATH)
+        tmp = f"{MODEL_PATH}.{os.getpid()}.tmp"
+        joblib.dump({"model": served, "features": FEATURE_COLUMNS}, tmp)
+        os.replace(tmp, MODEL_PATH)
 
     print("=== Training complete ===")
     for k, v in metrics.items():

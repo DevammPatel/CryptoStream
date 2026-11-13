@@ -12,11 +12,17 @@ double counted.
 
 Only Spark's part-* files and earlier compact-* files are touched. Backfill and sample
 files keep their names and are left alone.
+
+Only one compaction of a lake runs at a time on a machine: a run that finds another
+one busy skips it, since the next run will catch up.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -128,16 +134,41 @@ def expire(fs, ds: Dataset, now: datetime, days: float) -> int:
     return len(old)
 
 
+@contextmanager
+def only_one(name: str):
+    """Yield True while holding a lock no other process on this machine holds, else False."""
+    import fcntl
+
+    with open(os.path.join(tempfile.gettempdir(), f"cryptostream-{name}.lock"), "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def compaction_lock(features_uri: str):
+    """The lock for compacting one lake; other lakes compact independently."""
+    return only_one(f"compaction-{hashlib.sha1(features_uri.encode()).hexdigest()[:12]}")
+
+
 def compact_lake(con: duckdb.DuckDBPyConnection, features_uri: str, now: datetime | None = None) -> dict:
     """Compact every dataset, then expire raw trades past RAW_RETENTION_DAYS."""
-    now = now or datetime.now(timezone.utc)
-    fs = filesystem(features_uri)
-    con.execute("SET TimeZone = 'UTC';")
-    summary = {}
-    for ds in datasets(features_uri):
-        if not fs.exists(ds.path):
-            continue
-        summary[ds.path] = compact(con, fs, ds, now)
-        if ds.time_col == "event_ts":
-            summary[ds.path]["expired_files"] = expire(fs, ds, now, RAW_RETENTION_DAYS)
-    return summary
+    with compaction_lock(features_uri) as free:
+        if not free:
+            return {"skipped": "another run is compacting the lake"}
+        now = now or datetime.now(timezone.utc)
+        fs = filesystem(features_uri)
+        con.execute("SET TimeZone = 'UTC';")
+        summary = {}
+        for ds in datasets(features_uri):
+            if not fs.exists(ds.path):
+                continue
+            summary[ds.path] = compact(con, fs, ds, now)
+            if ds.time_col == "event_ts":
+                summary[ds.path]["expired_files"] = expire(fs, ds, now, RAW_RETENTION_DAYS)
+        return summary

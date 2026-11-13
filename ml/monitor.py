@@ -1,16 +1,19 @@
 """Live track record: how the served model does on bars it has never seen.
 
 Every finished live bar gets one prediction from the model being served. Thirty
-seconds later the bar at +30s settles it: did the close go up? Only bars newer than
-everything the model trained on count (its trained_through), so the record is out of
-sample by construction. The API serves the totals at /model/live and the dashboard
-shows them next to the model's call.
+seconds later the bar at +30s settles it: did the close go up? If that bar never
+comes (a gap in the feed), the call is void, just as training gives such a row no
+label. Only bars newer than everything the model trained on count (its
+trained_through), so the record is out of sample by construction. The API serves the
+totals at /model/live and the dashboard shows them next to the model's call.
 
-Records are kept in memory for 24 hours. After an API restart the bars topic is
-replayed (one hour of retention), so the last hour is scored again.
+Records are kept for 24 hours. The API saves them to a file every minute and loads it
+on startup, so a restart or a new image keeps the history.
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 
 import numpy as np
@@ -43,7 +46,7 @@ class Scorecard:
     def __init__(self, keep_ms: int = KEEP_MS) -> None:
         self.keep_ms = keep_ms
         self._lock = threading.Lock()
-        # symbol -> window_start (ms) -> {prob_up, close, outcome, model_id}
+        # symbol -> window_start (ms) -> {prob_up, close, outcome, void, model_id}
         self._records: dict[str, dict[int, dict]] = {}
 
     def step(
@@ -62,11 +65,16 @@ class Scorecard:
                 continue
             finished = df[df["window_end"] + GRACE_MS <= now_ms].reset_index(drop=True)
             closes = dict(zip(finished["window_start"].astype("int64"), finished["close"]))
+            newest = max(closes, default=None)
             with self._lock:
                 records = self._records.setdefault(symbol, {})
                 for start, record in records.items():
-                    if record["outcome"] is None and start + HORIZON_MS in closes:
+                    if record["outcome"] is not None or record["void"]:
+                        continue
+                    if start + HORIZON_MS in closes:
                         record["outcome"] = int(closes[start + HORIZON_MS] > record["close"])
+                    elif newest is not None and newest > start + HORIZON_MS:
+                        record["void"] = True  # later bars finished, but not the one at +30s
                 seen = set(records)
             if model is None:
                 continue
@@ -85,9 +93,37 @@ class Scorecard:
                         "prob_up": float(p),
                         "close": float(close),
                         "outcome": None if later is None else int(later > close),
+                        "void": later is None and newest is not None and newest > start + HORIZON_MS,
                         "model_id": model_id,
                     }
         self._prune(now_ms)
+
+    def save(self, path: str) -> None:
+        """Write every record to a JSON file (write then rename)."""
+        with self._lock:
+            data = {sym: {str(start): dict(r) for start, r in by_start.items()} for sym, by_start in self._records.items()}
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+
+    def load(self, path: str, now_ms: int) -> int:
+        """Add the records an earlier run saved, except those past keep_ms. Returns how many."""
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):  # no file yet, or a damaged one: start afresh
+            return 0
+        oldest = now_ms - self.keep_ms
+        added = 0
+        with self._lock:
+            for symbol, by_start in data.items():
+                records = self._records.setdefault(symbol, {})
+                for start, record in by_start.items():
+                    if int(start) >= oldest and int(start) not in records:
+                        records[int(start)] = record
+                        added += 1
+        return added
 
     def _prune(self, now_ms: int) -> None:
         with self._lock:
@@ -106,10 +142,11 @@ class Scorecard:
                 if model_id is None or r["model_id"] == model_id
             ]
         settled = [r for r in records if r["outcome"] is not None]
+        pending = sum(1 for r in records if r["outcome"] is None and not r["void"])
         stats = settle_stats(
             np.array([r["prob_up"] for r in settled]), np.array([r["outcome"] for r in settled])
         )
-        return {**stats, "pending": len(records) - len(settled)}
+        return {**stats, "pending": pending}
 
 
 def epoch_ms(iso: str | None) -> int | None:

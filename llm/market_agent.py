@@ -230,9 +230,10 @@ def save_market_summary(record: dict, path: str | None = None) -> str:
     """Write then rename, so the dashboard never reads half a file."""
     path = path or summary_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(f"{path}.tmp", "w") as fh:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
         json.dump(record, fh, indent=2)
-    os.replace(f"{path}.tmp", path)
+    os.replace(tmp, path)
     return path
 
 

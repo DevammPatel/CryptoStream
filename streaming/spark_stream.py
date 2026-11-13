@@ -85,13 +85,17 @@ def read_trades(spark: SparkSession):
         .option("failOnDataLoss", "false")
         .load()
     )
-    parsed = (
+    return parse_trades(raw)
+
+
+def parse_trades(raw):
+    """Kafka records (a `value` column of JSON trades) to typed trades with event time."""
+    return (
         raw.select(F.from_json(F.col("value").cast("string"), TRADE_SCHEMA).alias("t"))
         .select("t.*")
         .withColumn("event_ts", (F.col("trade_time") / 1000).cast("timestamp"))
         .withWatermark("event_ts", "30 seconds")
     )
-    return parsed
 
 
 def compute_ohlcv(trades):

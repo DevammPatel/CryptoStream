@@ -25,10 +25,13 @@ Run the UI:   dagster dev -m cryptostream_dagster.definitions
 Dagster inspects the `context` annotation at runtime, so this module must not use
 `from __future__ import annotations`.
 """
+import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from urllib.parse import urlparse
 
 import duckdb
@@ -57,10 +60,22 @@ def served_path() -> str:
     return os.getenv("DUCKDB_PATH", os.path.join(REPO, "data", "warehouse", "crypto.duckdb"))
 
 
-def build_path() -> str:
-    """The build copy keeps the served file's name: dbt writes the name into its views."""
+BUILD_KEEP = 24 * 3600  # seconds; build folders left by failed runs are cleared after this
+
+
+def build_path(run_id: str) -> str:
+    """Each run builds its own copy, so a scheduled run and a manual one never fight
+    over one file. The copy keeps the served file's name: dbt writes it into its views."""
     served = served_path()
-    return os.path.join(os.path.dirname(served), ".build", os.path.basename(served))
+    return os.path.join(os.path.dirname(served), ".build", run_id, os.path.basename(served))
+
+
+def clear_old_builds() -> None:
+    """Remove what failed runs left in .build/ (a published build removes its own folder)."""
+    root = os.path.join(os.path.dirname(served_path()), ".build")
+    for entry in glob.glob(os.path.join(root, "*")):
+        if time.time() - os.path.getmtime(entry) > BUILD_KEEP:
+            shutil.rmtree(entry) if os.path.isdir(entry) else os.remove(entry)
 
 
 def connect_lake_storage(con: duckdb.DuckDBPyConnection) -> None:
@@ -83,13 +98,14 @@ def connect_lake_storage(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def publish_warehouse() -> None:
-    """Swap the finished build copy in as the served warehouse."""
-    build = build_path()
+def publish_warehouse(run_id: str) -> None:
+    """Swap the run's finished build copy in as the served warehouse."""
+    build = build_path(run_id)
     con = duckdb.connect(build)
     con.execute("CHECKPOINT;")
     con.close()
     os.replace(build, served_path())
+    shutil.rmtree(os.path.dirname(build), ignore_errors=True)
 
 
 @asset(description="Merge each finished hour of Spark's small lake files, and expire old raw trades.")
@@ -106,11 +122,9 @@ def compact_lake(context: AssetExecutionContext) -> MaterializeResult:
 
 @asset(deps=[compact_lake], description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
 def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
-    build = build_path()
+    clear_old_builds()
+    build = build_path(context.run_id)
     os.makedirs(os.path.dirname(build), exist_ok=True)
-    for stale in (build, f"{build}.wal"):
-        if os.path.exists(stale):
-            os.remove(stale)
 
     parquet = f"{lake_uri()}/**/*.parquet"
     con = duckdb.connect(build)
@@ -147,10 +161,14 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
 
 @asset(deps=[lake_to_duckdb], description="Run dbt build (models + tests), then publish the warehouse.")
 def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
+    build = build_path(context.run_id)
+    run_dir = os.path.dirname(build)
+    # dbt's own files go in the run's folder too, so overlapping runs don't share them.
     result = subprocess.run(
-        ["dbt", "build", "--profiles-dir", "."],
+        ["dbt", "build", "--profiles-dir", ".",
+         "--target-path", os.path.join(run_dir, "dbt-target"), "--log-path", os.path.join(run_dir, "dbt-logs")],
         cwd=WAREHOUSE_DIR,
-        env=dict(os.environ, DBT_DUCKDB_PATH=build_path()),
+        env=dict(os.environ, DBT_DUCKDB_PATH=build),
         capture_output=True,
         text=True,
     )
@@ -158,7 +176,7 @@ def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     if result.returncode != 0:
         context.log.error(result.stderr[-3000:])
         raise Exception("dbt build failed")
-    publish_warehouse()
+    publish_warehouse(context.run_id)
     return MaterializeResult(metadata={"stdout_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
 
 

@@ -14,15 +14,19 @@ Covered:
   - a new model replaces the served one only if it scores at least as well on unseen rows
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - overlapping pipeline runs build separate warehouse copies, and only one compacts
+  - the dashboard renders from the warehouse alone when the API is down
   - indicators and labels are time-based, identical in dbt and Python, across gaps
   - duplicate copies of a bar collapse to the most complete one
   - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
+  - rerunning the backfill over part of a day keeps the bars it doesn't cover
   - bar times stay UTC whatever the time zone of the machine reading them
   - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
   - compaction re-lists S3 instead of trusting a cached listing
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars, /model/info
-  - live track record: only bars newer than the model's training data, settled 30s later
+  - live track record: only bars newer than the model's training data, settled 30s later,
+    void across gaps, and kept across a restart
 
 Run:  pytest -q
 """
@@ -125,8 +129,11 @@ def test_ingestion_stops_cleanly_on_sigterm(tmp_path):
 
 @pytest.fixture(scope="session")
 def sample_data(tmp_path_factory):
+    # Everything goes to temporary folders, never to the repo's own data/ (the generator
+    # replaces whole symbol folders, which would wipe a developer's backfilled lake).
     db_path = str(tmp_path_factory.mktemp("wh") / "crypto.duckdb")
     os.environ["DUCKDB_PATH"] = db_path
+    os.environ["LAKE_URI"] = str(tmp_path_factory.mktemp("lake") / "features" / "ohlcv_10s")
     subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"),
          "--minutes", "120", "--symbols", "btcusdt,ethusdt"],
@@ -153,7 +160,8 @@ def test_sample_data_is_realistic_and_repeatable(tmp_path):
         db = str(tmp_path / f"run{run}.duckdb")
         subprocess.run(
             [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"), "--minutes", "60", "--symbols", "btcusdt"],
-            check=True, cwd=REPO, env=dict(os.environ, DUCKDB_PATH=db), capture_output=True,
+            check=True, cwd=REPO, capture_output=True,
+            env=dict(os.environ, DUCKDB_PATH=db, LAKE_URI=str(tmp_path / f"lake{run}")),
         )
         con = duckdb.connect(db, read_only=True)
         closes.append(np.array([r[0] for r in con.execute("select close from raw.ohlcv_10s order by window_start").fetchall()]))
@@ -406,6 +414,51 @@ def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypat
     con.close()
 
 
+def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_path, monkeypatch):
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
+    monkeypatch.setenv("API_URL", "http://127.0.0.1:9")  # nothing listens: the API is down
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path / "no-model"))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    app = AppTest.from_file(os.path.join(REPO, "dashboard", "app.py"), default_timeout=60).run()
+    assert not app.exception
+    captions = [c.value for c in app.caption]
+    assert "Source: Warehouse (refreshes every 15 minutes)" in captions
+    assert [m.label for m in app.metric] == ["Last price", "vs SMA-30", "Volatility (30)", "Order-flow imbalance"]
+    assert any("Prediction service unavailable" in i.value for i in app.info)
+    # No summary saved yet, so the page builds the free template itself.
+    assert any(m.value.startswith("Market read (2 assets)") for m in app.markdown)
+    assert any("Dagster hasn't saved a summary yet" in c for c in captions)
+
+
+def test_overlapping_runs_build_their_own_warehouse_copy(sample_data, tmp_path, monkeypatch):
+    """A scheduled run and a manual one can overlap; each builds its own copy."""
+    import threading
+
+    import duckdb
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    results = []
+    runs = [threading.Thread(target=lambda: results.append(materialize([lake_to_duckdb, dbt_models]).success))
+            for _ in range(2)]
+    for run in runs:
+        run.start()
+    for run in runs:
+        run.join()
+    assert results == [True, True]
+    assert list((tmp_path / ".build").iterdir()) == []  # each published run removed its folder
+    con = duckdb.connect(str(served), read_only=True)
+    assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
+    con.close()
+
+
 def lake_with_gaps(tmp_path):
     """The btcusdt sample bars with a 50s outage, every 17th bar missing, and a few bars
     written twice: a partial copy, as Spark leaves when it replays a batch."""
@@ -414,7 +467,7 @@ def lake_with_gaps(tmp_path):
     import numpy as np
     import pandas as pd
 
-    files = glob.glob(os.path.join(REPO, "data", "lake", "features", "ohlcv_10s", "symbol=btcusdt", "*.parquet"))
+    files = glob.glob(os.path.join(os.environ["LAKE_URI"], "symbol=btcusdt", "*.parquet"))  # the sample lake
     bars = pd.concat([pd.read_parquet(f) for f in files]).sort_values("window_start").reset_index(drop=True)
     keep = np.ones(len(bars), dtype=bool)
     keep[100:105] = False
@@ -524,6 +577,23 @@ def test_backfill_files_load_next_to_spark_files(sample_data, tmp_path, monkeypa
     assert backfilled == 6
 
 
+def test_backfill_rerun_keeps_the_rest_of_the_day(tmp_path, monkeypatch):
+    import duckdb
+    from cryptostream_dagster.backfill import bars_from_klines, write_day
+
+    monkeypatch.setenv("LAKE_URI", str(tmp_path / "lake"))
+    t0 = 1_600_000_000_000
+    con = duckdb.connect()
+    # A full run writes 6 bars; a shorter rerun covers only the last 3, with new prices.
+    write_day(con, bars_from_klines([kline(t0 + i * 1000, 100, 101, 99, 100, 1.0, 3, 0.5) for i in range(60)]),
+              "btcusdt", "2020-09-13")
+    target = write_day(con, bars_from_klines([kline(t0 + i * 1000, 200, 201, 199, 200, 1.0, 3, 0.5)
+                                              for i in range(30, 60)]), "btcusdt", "2020-09-13")
+    closes = [r[0] for r in con.execute(f"select close from read_parquet('{target}') order by window_start").fetchall()]
+    con.close()
+    assert closes == [100.0, 100.0, 100.0, 200.0, 200.0, 200.0]
+
+
 def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):
     import duckdb
     import pandas as pd
@@ -618,6 +688,23 @@ def test_compaction_merges_finished_hours_and_expires_old_trades(tmp_path):
     con.close()
 
 
+def test_compaction_skips_while_another_run_compacts(tmp_path):
+    from datetime import datetime, timezone
+
+    import duckdb
+    from cryptostream_dagster.compaction import compact_lake, compaction_lock
+
+    now = datetime(2026, 11, 11, 15, 25, tzinfo=timezone.utc)
+    root, feats, trades, bars = spark_lake(tmp_path, now)
+    uri = str(root / "features" / "ohlcv_10s")
+    before = sorted(p.name for p in feats.iterdir())
+    with compaction_lock(uri) as mine:
+        assert mine
+        summary = compact_lake(duckdb.connect(), uri, now=now)
+    assert summary == {"skipped": "another run is compacting the lake"}
+    assert sorted(p.name for p in feats.iterdir()) == before
+
+
 def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):
     """DuckDB writes the merged file straight to S3, so s3fs must list the bucket again
     to find it. A cached listing made the move fail with FileNotFoundError."""
@@ -703,6 +790,45 @@ def test_track_record_counts_only_unseen_bars_and_settles_them_later():
     assert card.summary("model-a")["n"] == 49 and card.summary("model-a")["pending"] == 0
     assert card.summary("model-b") == {**card.summary("model-b"), "n": 0, "pending": 3}
     assert card.summary(symbol="ethusdt") == {"n": 0, "pending": 0}
+
+
+def test_track_record_voids_calls_whose_next_bar_never_comes():
+    import time
+
+    from features import FEATURE_COLUMNS
+    from monitor import Scorecard
+
+    now = int(time.time() * 1000)
+    bars = make_bars(60, now - 2_000)
+    gap = {bars[45]["window_start"], bars[46]["window_start"], bars[47]["window_start"]}
+    store = filled_store([b for b in bars if b["window_start"] not in gap])
+    card = Scorecard()
+    card.step(store, ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now)
+    card.step(store, ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now + 5_000)
+    # Calls start at bar 30 (31 bars of history). Bars 30-41 and 49-56 settle. Bars
+    # 42-44 lose their bar at +30s to the gap, so they are void: neither scored nor
+    # pending. Bar 48 has no return across the gap, so no call. Bars 57-59 still wait.
+    assert card.summary("model-a") == {**card.summary("model-a"), "n": 12 + 8, "pending": 3}
+
+
+def test_track_record_survives_a_restart(tmp_path):
+    import time
+
+    from features import FEATURE_COLUMNS
+    from monitor import KEEP_MS, Scorecard
+
+    now = int(time.time() * 1000)
+    card = Scorecard()
+    card.step(filled_store(make_bars(80, now - 2_000)), ConstantModel(0.6), FEATURE_COLUMNS, "model-a", None, now)
+    path = str(tmp_path / "live_track_record.json")
+    card.save(path)
+
+    restarted = Scorecard()
+    assert restarted.load(path, now) == 49
+    assert restarted.summary("model-a") == card.summary("model-a")
+    assert Scorecard().load(path, now + KEEP_MS + 10 * 60_000) == 0  # all past the 24 hours
+    (tmp_path / "damaged.json").write_text("{not json")
+    assert Scorecard().load(str(tmp_path / "damaged.json"), now) == 0
 
 
 def test_api_reports_the_live_track_record(api):
@@ -818,6 +944,7 @@ def api(sample_data, model_dir, monkeypatch):
     monkeypatch.setattr(main, "MODEL_PATH", os.path.join(model_dir, "direction_lgbm.pkl"))
     monkeypatch.setattr(main, "META_PATH", os.path.join(model_dir, "model_meta.json"))
     monkeypatch.setattr(main, "LAST_RUN_PATH", os.path.join(model_dir, "last_training.json"))
+    monkeypatch.setattr(main, "TRACK_PATH", os.path.join(model_dir, "live_track_record.json"))
     monkeypatch.setattr(main, "live_bars", LiveBars())
     monkeypatch.setitem(main._state, "mtime", None)
     return main, TestClient(main.app)

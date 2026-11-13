@@ -137,12 +137,29 @@ def bars_from_klines(rows: list[list]) -> pd.DataFrame:
 
 
 def write_day(con: duckdb.DuckDBPyConnection, bars: pd.DataFrame, symbol: str, day: str) -> str:
+    """Write one day's bars, keeping bars an earlier run wrote for the rest of that day.
+
+    A shorter rerun (say the last 6 hours) would otherwise replace a whole day. Where
+    both runs have a window, the new bar wins.
+    """
     target = f"{lake_uri()}/symbol={symbol}/backfill-{day}.parquet"
     if not target.startswith("s3://"):
         os.makedirs(os.path.dirname(target), exist_ok=True)
-    con.register("bars", bars)
-    con.execute(f"COPY bars TO '{target}' (FORMAT PARQUET)")
-    con.unregister("bars")
+    con.register("new_bars", bars)
+    try:
+        # Read the old file fully before the COPY below overwrites it.
+        con.execute(f"CREATE OR REPLACE TEMP TABLE old_bars AS SELECT * FROM read_parquet('{target}')")
+        source = """
+            SELECT * FROM new_bars
+            UNION ALL BY NAME
+            SELECT * FROM old_bars WHERE window_start NOT IN (SELECT window_start FROM new_bars)
+            ORDER BY window_start
+        """
+    except duckdb.IOException:  # no earlier file for this day
+        source = "SELECT * FROM new_bars"
+    con.execute(f"COPY ({source}) TO '{target}' (FORMAT PARQUET)")
+    con.execute("DROP TABLE IF EXISTS old_bars")
+    con.unregister("new_bars")
     return target
 
 

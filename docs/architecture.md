@@ -156,8 +156,9 @@ new one earns its place:
    later finishes. `/model/live` reports the hit rate and Brier score next to the best
    constant guess in hindsight, for the current model and for the last 24 hours across
    every served model. The dashboard shows the 24-hour figure, because every retrain
-   that ties or wins starts the current model's record from zero. It is kept in
-   memory; a restart rescores the hour of bars Kafka still holds.
+   that ties or wins starts the current model's record from zero. The API saves the
+   record to `live_track_record.json` in the models folder every minute and loads it
+   on startup, so a restart or a new image keeps it.
 
 ## Market summary
 
@@ -221,5 +222,7 @@ otherwise skip the new batches). They then rebuild from the trades Kafka still h
 the overlap with bars already in the lake is removed by staging's deduplication.
 
 DuckDB locks a file against other processes, so Dagster never writes the served file.
-It builds a copy in `.build/` and renames it over the served file after dbt's tests
-pass. A failed build leaves the last good warehouse in place.
+Each run builds its own copy in `.build/<run id>/` and renames it over the served file
+after dbt's tests pass. A failed build leaves the last good warehouse in place, and a
+scheduled run that overlaps a manual one doesn't collide with it. Compaction is the one
+step that runs alone: a run that finds another compacting skips it.

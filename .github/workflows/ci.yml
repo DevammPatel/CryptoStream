@@ -7,6 +7,7 @@ on:
 
 jobs:
   test:
+    name: Lint and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +32,40 @@ jobs:
 
       - name: Unit / integration tests
         run: pytest -q
+
+      # Spark needs Java, so its bar tests get their own step.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Spark bar tests
+        run: |
+          pip install pyspark==3.5.1
+          pytest -q tests/test_spark.py
+
+  stack:
+    name: Docker stack smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      # Live Binance trades, a few hours of backfill, one pipeline run, then the API,
+      # the summary and the dashboard. See scripts/smoke_test.sh.
+      - name: Smoke test
+        run: ./scripts/smoke_test.sh
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
