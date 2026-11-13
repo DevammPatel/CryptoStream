@@ -91,3 +91,4 @@ CI runs the same tests, plus a job that builds every image, starts the stack and
 | Gaps in the charts after the laptop slept | Docker pauses with the machine, so no trades were collected. Windows and labels are time-based, so a gap never joins prices from either side; `make backfill` fills it. |
 | `make train` can't reach MLflow | `MLFLOW_TRACKING_URI` in `.env` points at the Docker MLflow server, which isn't running. Start the stack, or comment the line out to log to `./mlruns`. |
 | Dashboard says Dagster hasn't saved a summary yet | Normal until the first pipeline run; it shows the offline template meanwhile. |
+| Docker's disk keeps growing | Check `docker system df`. Spark copies its jars (about 340 MB) into `/tmp` on every start and deletes them when it stops; a crash leaves the copy until Spark's next start clears it. Old build cache goes with `docker builder prune`. |

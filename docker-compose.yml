@@ -118,6 +118,8 @@ services:
       LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:-lakeadmin}
       LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:-lakeadmin}
       LAKE_BUCKET: ${LAKE_BUCKET:-crypto-lake}
+    # Time to stop the three streaming queries and delete Spark's temp folders.
+    stop_grace_period: 30s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -170,6 +172,8 @@ services:
       - warehouse-data:/data
       - models-data:/models
       - dagster-data:/opt/dagster
+    # `dagster dev` stops its webserver, daemon and code servers one by one.
+    stop_grace_period: 30s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
