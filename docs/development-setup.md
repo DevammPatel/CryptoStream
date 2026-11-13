@@ -71,6 +71,17 @@ A fresh stack streams live trades straight away, but the first useful model need
 history: `make backfill` loads 7 days in a few minutes, and the next Dagster run (every
 15 minutes, or "Materialize all" in the Dagster UI) trains on it.
 
+### On a laptop
+
+The stack needs about 4 GB of memory, with Docker Desktop's default of half the RAM on
+an 8 GB machine. Spark and Dagster, the heavy services, are limited to 2 cores and 2 GB
+each, and only one Dagster run trains at a time. To keep a laptop cool:
+
+- Set `REFRESH_CRON="0 * * * *"` in `.env` to retrain hourly instead of every 15
+  minutes.
+- Lower the CPUs in Docker Desktop (Settings > Resources) if it still runs hot.
+- `make down` when you're done; it keeps all data.
+
 ## Tests
 
 ```bash

@@ -249,10 +249,11 @@ def market_summary(context: AssetExecutionContext) -> MaterializeResult:
 
 refresh_job = define_asset_job("refresh_pipeline", selection="*")
 
-# Retrain / refresh every 15 minutes (adjust cadence to taste).
+# Refresh and retrain every 15 minutes by default. REFRESH_CRON changes it: hourly
+# ("0 * * * *") is much lighter on a laptop. The dashboard reads the same setting.
 refresh_schedule = ScheduleDefinition(
     job=refresh_job,
-    cron_schedule="*/15 * * * *",
+    cron_schedule=os.getenv("REFRESH_CRON", "*/15 * * * *"),
     default_status=DefaultScheduleStatus.RUNNING,
 )
 

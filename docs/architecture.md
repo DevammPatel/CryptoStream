@@ -111,7 +111,7 @@ have no label).
    data instead, `make backfill-local DAYS=2` then `make refresh`.
 2. **Full live stack:** `make up` starts Redpanda, SeaweedFS, Spark, Dagster, MLflow, the
    API and dashboard in Docker; the ingestion service streams live Binance trades.
-   Dagster builds marts + retrains on a 15-minute schedule.
+   Dagster builds marts + retrains on a 15-minute schedule (`REFRESH_CRON` changes it).
 
 ## Fast path and slow path
 

@@ -120,6 +120,11 @@ services:
       LAKE_BUCKET: ${LAKE_BUCKET:-crypto-lake}
     # Time to stop the three streaming queries and delete Spark's temp folders.
     stop_grace_period: 30s
+    # Spark and Dagster are the heavy services. Without limits they took every core
+    # Docker had, and together ran a laptop's Docker VM out of memory. Spark sizes its
+    # worker threads to these cores; its driver heap is 1 GB.
+    cpus: 2
+    mem_limit: 2g
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -166,6 +171,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      REFRESH_CRON: ${REFRESH_CRON:-*/15 * * * *}
     ports:
       - "3000:3000"
     volumes:
@@ -174,6 +180,9 @@ services:
       - dagster-data:/opt/dagster
     # `dagster dev` stops its webserver, daemon and code servers one by one.
     stop_grace_period: 30s
+    # Training peaks near 1 GB, and only one run trains at a time.
+    cpus: 2
+    mem_limit: 2g
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -213,6 +222,7 @@ services:
     environment:
       API_URL: http://api:8000
       DUCKDB_PATH: /data/warehouse/crypto.duckdb
+      REFRESH_CRON: ${REFRESH_CRON:-*/15 * * * *}  # only to describe the schedule
     ports:
       - "8501:8501"
     volumes:

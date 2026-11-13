@@ -95,7 +95,7 @@ make ps           # check services
 # MLflow: http://localhost:5001             Dashboard: http://localhost:8501
 # Dagster: http://localhost:3000
 
-# Every 15 minutes Dagster builds the marts and retrains on the collected data.
+# Every 15 minutes (REFRESH_CRON in .env) Dagster builds the marts and retrains.
 # Early runs fail until there is enough data: the dashboard fills in after the first
 # run that finds bars, and predictions start at about 200 rows (15 to 30 minutes).
 

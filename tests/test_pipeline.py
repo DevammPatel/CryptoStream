@@ -422,6 +422,7 @@ def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_p
     monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
     monkeypatch.setenv("API_URL", "http://127.0.0.1:9")  # nothing listens: the API is down
     monkeypatch.setenv("MODEL_DIR", str(tmp_path / "no-model"))
+    monkeypatch.delenv("REFRESH_CRON", raising=False)
     assert materialize([lake_to_duckdb, dbt_models]).success
 
     app = AppTest.from_file(os.path.join(REPO, "dashboard", "app.py"), default_timeout=60).run()
@@ -433,6 +434,10 @@ def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_p
     # No summary saved yet, so the page builds the free template itself.
     assert any(m.value.startswith("Market read (2 assets)") for m in app.markdown)
     assert any("Dagster hasn't saved a summary yet" in c for c in captions)
+
+    # The caption follows the schedule Dagster is given.
+    monkeypatch.setenv("REFRESH_CRON", "0 * * * *")
+    assert "Source: Warehouse (refreshes every hour)" in [c.value for c in app.run().caption]
 
 
 def test_overlapping_runs_build_their_own_warehouse_copy(sample_data, tmp_path, monkeypatch):
