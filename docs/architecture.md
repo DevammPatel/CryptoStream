@@ -211,15 +211,20 @@ they are the training history, and small once compacted.
 | `lake-data` | Spark, through the S3 API | Dagster, through the S3 API |
 | `warehouse-data` (DuckDB file) | Dagster | API, dashboard |
 | `models-data` | Dagster | API |
+| `spark-checkpoints` (live query's progress) | Spark | Spark |
 
-`make down` keeps every volume. Spark's checkpoints live in `lake-data` and point at
-offsets in `redpanda-data`, so wipe them together with `make clean`, never one alone.
+`make down` keeps every volume. Spark's checkpoints point at offsets in
+`redpanda-data`: the two lake queries keep theirs in `lake-data`, next to what they
+write, and the live query keeps its own in `spark-checkpoints`. That one commits every 2
+seconds, which over S3 took longer than the 2 seconds themselves. Wipe the checkpoints
+together with Kafka (`make clean`), never one alone.
 
 Spark also keeps the state of its bar aggregation in those checkpoints, and refuses to
 reuse it once the aggregation code changes. After such a change, `make reset-bar-state`
 clears the state of just the two bar queries (and the lake sink's file log, which would
-otherwise skip the new batches). They then rebuild from the trades Kafka still holds;
-the overlap with bars already in the lake is removed by staging's deduplication.
+otherwise skip the new batches). The lake query rebuilds from the trades Kafka still
+holds, and the overlap with bars already in the lake is removed by staging's
+deduplication. The live query starts from the newest trades.
 
 DuckDB locks a file against other processes, so Dagster never writes the served file.
 Each run builds its own copy in `.build/<run id>/` and renames it over the served file

@@ -56,8 +56,9 @@ FILER = http://localhost:8888/buckets/$(LAKE_BUCKET)
 reset-bar-state:  ## Restart Spark's bar queries from scratch (once, after changing how bars are computed)
 	docker compose stop spark
 	curl -fsS -X DELETE "$(FILER)/_chk/ohlcv_10s/?recursive=true"
-	curl -fsS -X DELETE "$(FILER)/_chk/bars_live/?recursive=true"
 	curl -fsS -X DELETE "$(FILER)/features/ohlcv_10s/_spark_metadata/?recursive=true"
+	docker compose run --rm --no-deps -T --entrypoint rm spark -rf /checkpoints/bars_live
+	-@curl -sS -o /dev/null -X DELETE "$(FILER)/_chk/bars_live/?recursive=true"  # where it lived before
 	docker compose start spark
 
 dbt:  ## Run dbt models + tests
@@ -75,7 +76,8 @@ smoke:  ## End-to-end check of the running Docker stack (after `make up`)
 test-spark:  ## Run the Spark bar tests inside the Spark image (needs Java otherwise)
 	tar --no-xattrs -cf - streaming/spark_stream.py tests/test_spark.py pyproject.toml | \
 	docker compose run --rm -T --no-deps --entrypoint bash spark -c \
-	"mkdir -p /tmp/t && cd /tmp/t && tar -xf - && pip install -q pytest==8.2.2 && python -m pytest -p no:cacheprovider tests/test_spark.py"
+	"mkdir -p /tmp/t && cd /tmp/t && tar -xf - && python3 -m pip install -q pytest==8.2.2 \
+	&& PYTHONPATH=/opt/spark/python:\$$(echo /opt/spark/python/lib/py4j-*.zip) python3 -m pytest -p no:cacheprovider tests/test_spark.py"
 
 lint:  ## Lint with ruff
 	ruff check .

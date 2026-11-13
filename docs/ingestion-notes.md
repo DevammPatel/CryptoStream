@@ -46,5 +46,6 @@ docker compose stop ingestion   # otherwise every trade is sent twice
 make ingest-local               # reads KAFKA_BOOTSTRAP (localhost:9092) from .env
 ```
 
-Spark does not de-duplicate trades by id, so two producers on the same topic would
-double every bar's volume and trade count.
+If both run, Kafka gets every trade twice. The bars are still right: Spark drops a
+trade whose symbol and trade id it has seen in the last 30 seconds before building
+them. The raw trade archive in the lake keeps both copies.

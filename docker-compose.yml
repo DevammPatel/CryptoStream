@@ -121,6 +121,10 @@ services:
       LAKE_ACCESS_KEY: ${LAKE_ACCESS_KEY:-lakeadmin}
       LAKE_SECRET_KEY: ${LAKE_SECRET_KEY:-lakeadmin}
       LAKE_BUCKET: ${LAKE_BUCKET:-crypto-lake}
+      CHECKPOINT_DIR: /checkpoints
+    volumes:
+      # The live query's progress. The lake queries keep theirs in the lake.
+      - spark-checkpoints:/checkpoints
     # Time to stop the three streaming queries and delete Spark's temp folders.
     stop_grace_period: 30s
     # Spark and Dagster are the heavy services. Without limits they took every core
@@ -239,3 +243,4 @@ volumes:
   warehouse-data:
   models-data:
   dagster-data:
+  spark-checkpoints:

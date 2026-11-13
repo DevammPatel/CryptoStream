@@ -19,14 +19,15 @@
 6. **Tests, CI and docs.** Tests cover ingestion, dbt parity, training and promotion,
    the API, the summary, the dashboard, Spark's bar logic, the backfill and compaction.
    CI also builds and smoke-tests the whole Docker stack.
+7. **Light enough for a laptop.** Spark shuts down cleanly instead of leaving 340 MB
+   behind per stop; Spark and Dagster have CPU and memory limits; only one run trains
+   at a time; the schedule is a setting (`REFRESH_CRON`); ports listen on the local
+   machine only.
+8. **Exact live bars.** Spark drops duplicate trades before building bars, and the
+   live query keeps its checkpoint on a local volume, so it holds its 2-second pace.
 
 ## Known limits
 
-- **Spark's live query saves progress to S3 every 2 seconds.** Each 2-second batch takes
-  about 3 seconds, so live bars arrive about a second later than planned. A local
-  checkpoint volume would remove most of that.
-- **Spark does not de-duplicate trades by id.** Two producers on one topic double the
-  volume (see [ingestion-notes.md](ingestion-notes.md)).
 - **One machine, no authentication.** The stack is for development and demos: no
   service asks for a password, so every port listens on the local machine only
   (`BIND_ADDRESS` opens them). The SeaweedFS key comes from `.env`.
