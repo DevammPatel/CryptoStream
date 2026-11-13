@@ -422,6 +422,7 @@ def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_p
     monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
     monkeypatch.setenv("API_URL", "http://127.0.0.1:9")  # nothing listens: the API is down
     monkeypatch.setenv("MODEL_DIR", str(tmp_path / "no-model"))
+    monkeypatch.delenv("REFRESH_CRON", raising=False)
     assert materialize([lake_to_duckdb, dbt_models]).success
 
     app = AppTest.from_file(os.path.join(REPO, "dashboard", "app.py"), default_timeout=60).run()
@@ -433,6 +434,10 @@ def test_dashboard_renders_from_the_warehouse_without_the_api(sample_data, tmp_p
     # No summary saved yet, so the page builds the free template itself.
     assert any(m.value.startswith("Market read (2 assets)") for m in app.markdown)
     assert any("Dagster hasn't saved a summary yet" in c for c in captions)
+
+    # The caption follows the schedule Dagster is given.
+    monkeypatch.setenv("REFRESH_CRON", "0 * * * *")
+    assert "Source: Warehouse (refreshes every hour)" in [c.value for c in app.run().caption]
 
 
 def test_overlapping_runs_build_their_own_warehouse_copy(sample_data, tmp_path, monkeypatch):
@@ -703,6 +708,25 @@ def test_compaction_skips_while_another_run_compacts(tmp_path):
         summary = compact_lake(duckdb.connect(), uri, now=now)
     assert summary == {"skipped": "another run is compacting the lake"}
     assert sorted(p.name for p in feats.iterdir()) == before
+
+
+def test_training_skips_while_another_run_trains(tmp_path, monkeypatch):
+    """Two runs training at once ran Docker out of memory, so the second one skips."""
+    from cryptostream_dagster import definitions
+    from dagster import build_asset_context
+
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    started = []
+    monkeypatch.setattr(definitions.subprocess, "run", lambda *args, **kwargs: started.append(args))
+    with definitions.training_lock() as mine:
+        assert mine
+        result = definitions.ml_model(build_asset_context())
+    assert started == []
+    assert result.metadata["skipped"].value == "another run is training"
+    # Another model folder (another test run, say) trains independently.
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path / "other"))
+    with definitions.training_lock() as free:
+        assert free
 
 
 def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):

@@ -113,13 +113,25 @@ def get_summary() -> dict:
     return load_saved_summary() or {**build_market_summary(use_llm=False), "built_here": True}
 
 
+def refresh_cadence() -> str:
+    """Dagster's refresh schedule in words, from the REFRESH_CRON setting it also reads."""
+    cron = os.getenv("REFRESH_CRON") or "*/15 * * * *"
+    minute, *rest = cron.split()
+    if rest == ["*", "*", "*", "*"]:
+        if minute.startswith("*/") and minute[2:].isdigit():
+            return f"every {minute[2:]} minutes"
+        if minute.isdigit():
+            return "every hour"
+    return f"on the schedule {cron}"
+
+
 def summary_caption(record: dict) -> str:
     if record.get("built_here"):
         return "Offline template built by this page: Dagster hasn't saved a summary yet."
     written = pd.Timestamp(record["generated_at"])
     minutes = (pd.Timestamp.now(tz="UTC") - written).total_seconds() / 60
     by = "the LLM" if record["source"] == "llm" else "the offline template"
-    note = f"Written by {by} at {written:%H:%M} UTC ({minutes:.0f} min ago); Dagster refreshes it every 15 minutes."
+    note = f"Written by {by} at {written:%H:%M} UTC ({minutes:.0f} min ago); Dagster refreshes it {refresh_cadence()}."
     if record.get("llm_error"):
         note += f" The LLM call failed: {record['llm_error']}"
     return note
@@ -142,7 +154,7 @@ def live_view(symbol: str) -> None:
     source = "Live stream"
     if bars is None:
         bars = load_bars(symbol)
-        source = "Warehouse (refreshes every 15 minutes)"
+        source = f"Warehouse (refreshes {refresh_cadence()})"
     if bars.empty:
         st.info("Waiting for bars.")
         return

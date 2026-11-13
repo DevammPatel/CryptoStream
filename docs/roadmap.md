@@ -27,7 +27,8 @@
   checkpoint volume would remove most of that.
 - **Spark does not de-duplicate trades by id.** Two producers on one topic double the
   volume (see [ingestion-notes.md](ingestion-notes.md)).
-- **One machine, no authentication.** The stack is for development and demos: every
-  service listens without a password, and SeaweedFS uses a fixed key.
+- **One machine, no authentication.** The stack is for development and demos: no
+  service asks for a password, so every port listens on the local machine only
+  (`BIND_ADDRESS` opens them). The SeaweedFS key comes from `.env`.
 - **The model's edge is small.** About 0.525 AUC on a week of real data. Richer
   features (cross-symbol moves, order-book data) are the obvious next step.

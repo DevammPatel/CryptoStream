@@ -56,6 +56,9 @@ make down    # stop; keeps all data
 make clean   # stop and delete all data volumes
 ```
 
+Every port listens on this machine only, because no service asks for a password.
+`BIND_ADDRESS=0.0.0.0` in `.env` opens them to your network, for a demo on a phone, say.
+
 | Service | URL |
 |---|---|
 | Dashboard (Streamlit) | http://localhost:8501 |
@@ -70,6 +73,17 @@ make clean   # stop and delete all data volumes
 A fresh stack streams live trades straight away, but the first useful model needs
 history: `make backfill` loads 7 days in a few minutes, and the next Dagster run (every
 15 minutes, or "Materialize all" in the Dagster UI) trains on it.
+
+### On a laptop
+
+The stack needs about 4 GB of memory, with Docker Desktop's default of half the RAM on
+an 8 GB machine. Spark and Dagster, the heavy services, are limited to 2 cores and 2 GB
+each, and only one Dagster run trains at a time. To keep a laptop cool:
+
+- Set `REFRESH_CRON="0 * * * *"` in `.env` to retrain hourly instead of every 15
+  minutes.
+- Lower the CPUs in Docker Desktop (Settings > Resources) if it still runs hot.
+- `make down` when you're done; it keeps all data.
 
 ## Tests
 
@@ -91,3 +105,4 @@ CI runs the same tests, plus a job that builds every image, starts the stack and
 | Gaps in the charts after the laptop slept | Docker pauses with the machine, so no trades were collected. Windows and labels are time-based, so a gap never joins prices from either side; `make backfill` fills it. |
 | `make train` can't reach MLflow | `MLFLOW_TRACKING_URI` in `.env` points at the Docker MLflow server, which isn't running. Start the stack, or comment the line out to log to `./mlruns`. |
 | Dashboard says Dagster hasn't saved a summary yet | Normal until the first pipeline run; it shows the offline template meanwhile. |
+| Docker's disk keeps growing | Check `docker system df`. Spark copies its jars (about 340 MB) into `/tmp` on every start and deletes them when it stops; a crash leaves the copy until Spark's next start clears it. Old build cache goes with `docker builder prune`. |

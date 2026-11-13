@@ -26,6 +26,7 @@ Dagster inspects the `context` annotation at runtime, so this module must not us
 `from __future__ import annotations`.
 """
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -180,23 +181,43 @@ def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"stdout_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
 
 
+def model_dir() -> str:
+    return os.getenv("MODEL_DIR", os.path.join(REPO, "ml", "models"))
+
+
+def training_lock():
+    """One training at a time per model folder.
+
+    Training is the heaviest step. A scheduled run and a manual one training together
+    needed more memory than a laptop's Docker VM has, and Docker killed Spark. A run
+    that finds the lock taken skips training: the other run is about to produce a
+    model anyway, and the served one stays in place until then.
+    """
+    folder = os.path.abspath(model_dir())
+    return compaction.only_one(f"training-{hashlib.sha1(folder.encode()).hexdigest()[:12]}")
+
+
 @asset(
     deps=[dbt_models],
     description="Train the direction classifier, log it to MLflow, and serve it if it beats the current one.",
 )
 def ml_model(context: AssetExecutionContext) -> MaterializeResult:
-    result = subprocess.run(
-        [sys.executable, os.path.join(REPO, "ml", "train.py")],
-        cwd=os.path.join(REPO, "ml"),
-        capture_output=True,
-        text=True,
-    )
+    with training_lock() as free:
+        if not free:
+            context.log.info("Another run is training, so this run keeps the served model.")
+            return MaterializeResult(metadata={"skipped": MetadataValue.text("another run is training")})
+        result = subprocess.run(
+            [sys.executable, os.path.join(REPO, "ml", "train.py")],
+            cwd=os.path.join(REPO, "ml"),
+            capture_output=True,
+            text=True,
+        )
     context.log.info(result.stdout[-3000:])
     if result.returncode != 0:
         context.log.error(result.stderr[-3000:])
         raise Exception("model training failed")
     metadata = {"log_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")}
-    last_run = os.path.join(os.getenv("MODEL_DIR", os.path.join(REPO, "ml", "models")), "last_training.json")
+    last_run = os.path.join(model_dir(), "last_training.json")
     if os.path.exists(last_run):
         with open(last_run) as fh:
             record = json.load(fh)
@@ -228,10 +249,11 @@ def market_summary(context: AssetExecutionContext) -> MaterializeResult:
 
 refresh_job = define_asset_job("refresh_pipeline", selection="*")
 
-# Retrain / refresh every 15 minutes (adjust cadence to taste).
+# Refresh and retrain every 15 minutes by default. REFRESH_CRON changes it: hourly
+# ("0 * * * *") is much lighter on a laptop. The dashboard reads the same setting.
 refresh_schedule = ScheduleDefinition(
     job=refresh_job,
-    cron_schedule="*/15 * * * *",
+    cron_schedule=os.getenv("REFRESH_CRON", "*/15 * * * *"),
     default_status=DefaultScheduleStatus.RUNNING,
 )
 
