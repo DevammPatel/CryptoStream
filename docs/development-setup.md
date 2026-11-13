@@ -56,6 +56,9 @@ make down    # stop; keeps all data
 make clean   # stop and delete all data volumes
 ```
 
+Every port listens on this machine only, because no service asks for a password.
+`BIND_ADDRESS=0.0.0.0` in `.env` opens them to your network, for a demo on a phone, say.
+
 | Service | URL |
 |---|---|
 | Dashboard (Streamlit) | http://localhost:8501 |
