@@ -224,5 +224,7 @@ the overlap with bars already in the lake is removed by staging's deduplication.
 DuckDB locks a file against other processes, so Dagster never writes the served file.
 Each run builds its own copy in `.build/<run id>/` and renames it over the served file
 after dbt's tests pass. A failed build leaves the last good warehouse in place, and a
-scheduled run that overlaps a manual one doesn't collide with it. Compaction is the one
-step that runs alone: a run that finds another compacting skips it.
+scheduled run that overlaps a manual one doesn't collide with it. Two steps run alone,
+and a run that finds another one busy with them skips them: compaction, and training,
+the heaviest step. Two trainings at once once needed more memory than a laptop's Docker
+VM had. A run that skips training keeps the served model and still writes its summary.

@@ -705,6 +705,25 @@ def test_compaction_skips_while_another_run_compacts(tmp_path):
     assert sorted(p.name for p in feats.iterdir()) == before
 
 
+def test_training_skips_while_another_run_trains(tmp_path, monkeypatch):
+    """Two runs training at once ran Docker out of memory, so the second one skips."""
+    from cryptostream_dagster import definitions
+    from dagster import build_asset_context
+
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    started = []
+    monkeypatch.setattr(definitions.subprocess, "run", lambda *args, **kwargs: started.append(args))
+    with definitions.training_lock() as mine:
+        assert mine
+        result = definitions.ml_model(build_asset_context())
+    assert started == []
+    assert result.metadata["skipped"].value == "another run is training"
+    # Another model folder (another test run, say) trains independently.
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path / "other"))
+    with definitions.training_lock() as free:
+        assert free
+
+
 def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):
     """DuckDB writes the merged file straight to S3, so s3fs must list the bucket again
     to find it. A cached listing made the move fail with FileNotFoundError."""
