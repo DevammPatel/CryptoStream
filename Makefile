@@ -76,7 +76,8 @@ smoke:  ## End-to-end check of the running Docker stack (after `make up`)
 test-spark:  ## Run the Spark bar tests inside the Spark image (needs Java otherwise)
 	tar --no-xattrs -cf - streaming/spark_stream.py tests/test_spark.py pyproject.toml | \
 	docker compose run --rm -T --no-deps --entrypoint bash spark -c \
-	"mkdir -p /tmp/t && cd /tmp/t && tar -xf - && pip install -q pytest==8.2.2 && python -m pytest -p no:cacheprovider tests/test_spark.py"
+	"mkdir -p /tmp/t && cd /tmp/t && tar -xf - && python3 -m pip install -q pytest==8.2.2 \
+	&& PYTHONPATH=/opt/spark/python:\$$(echo /opt/spark/python/lib/py4j-*.zip) python3 -m pytest -p no:cacheprovider tests/test_spark.py"
 
 lint:  ## Lint with ruff
 	ruff check .
