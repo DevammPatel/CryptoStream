@@ -1,4 +1,8 @@
-.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster refresh backfill backfill-local reset-bar-state dbt test lint fmt seed
+.PHONY: help up down logs ps clean ingest-local train api dashboard dagster refresh backfill backfill-local reset-bar-state dbt test lint fmt seed
+
+# Local run targets read .env first, the way Docker Compose does. The shell sources it,
+# so it holds plain KEY=value lines.
+WITH_ENV = set -a; [ ! -f .env ] || . ./.env; set +a;
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -23,19 +27,16 @@ venv:  ## Create a local virtualenv with all deps
 	python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements.txt
 
 ingest-local:  ## Run the ingestion producer locally (needs Redpanda up)
-	python ingestion/ws_producer.py
-
-features:  ## Build the feature/serving tables from lake parquet into DuckDB
-	python ml/features.py
+	$(WITH_ENV) python ingestion/ws_producer.py
 
 train:  ## Train the ML model and log to MLflow
-	python ml/train.py
+	$(WITH_ENV) python ml/train.py
 
 api:  ## Run the FastAPI server locally
-	uvicorn ml.api.main:app --reload --port 8000
+	$(WITH_ENV) uvicorn ml.api.main:app --reload --port 8000
 
 dashboard:  ## Run the Streamlit dashboard locally
-	streamlit run dashboard/app.py
+	$(WITH_ENV) streamlit run dashboard/app.py
 
 dagster:  ## Run the Dagster UI and the 15-minute schedule
 	dagster dev -m cryptostream_dagster.definitions
@@ -48,7 +49,7 @@ backfill:  ## Load DAYS (default 7) of real Binance history into the Docker lake
 	docker compose exec dagster python -m cryptostream_dagster.backfill --days $(DAYS)
 
 backfill-local:  ## Load DAYS of real Binance history into data/lake (use instead of `make seed`)
-	python -m cryptostream_dagster.backfill --days $(DAYS)
+	$(WITH_ENV) python -m cryptostream_dagster.backfill --days $(DAYS)
 
 LAKE_BUCKET ?= crypto-lake
 FILER = http://localhost:8888/buckets/$(LAKE_BUCKET)
@@ -60,10 +61,10 @@ reset-bar-state:  ## Restart Spark's bar queries from scratch (once, after chang
 	docker compose start spark
 
 dbt:  ## Run dbt models + tests
-	cd warehouse && dbt build --profiles-dir .
+	$(WITH_ENV) cd warehouse && dbt build --profiles-dir .
 
 seed:  ## Generate synthetic sample data (no network needed) for a quick demo
-	python scripts/generate_sample_data.py
+	$(WITH_ENV) python scripts/generate_sample_data.py
 
 test:  ## Run unit tests
 	pytest -q

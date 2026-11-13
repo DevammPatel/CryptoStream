@@ -57,7 +57,7 @@ flowchart LR
 | **Data Engineering** | Kafka/Redpanda ingestion, Spark Structured Streaming, SeaweedFS S3 data lake, Dagster orchestration, Dockerized services |
 | **Data Analytics** | dbt models (staging → intermediate → marts), data-quality tests, technical indicators, Streamlit BI dashboard |
 | **Data Science** | Feature engineering, walk-forward time-series validation, LightGBM classifier, MLflow experiment tracking |
-| **AI / ML** | Model serving via FastAPI, model reload/monitoring hooks, LLM market-summary agent (RAG-style over live stats) |
+| **AI / ML** | Model serving via FastAPI with hot reload, a promotion gate, and a live track record on unseen bars; LLM market-summary agent grounded in the warehouse snapshot and the model's calls |
 
 ## Data contracts
 
@@ -133,6 +133,41 @@ says which one was used.
 `int_technical_features.sql` in Python, for the live view and for training when dbt
 hasn't run. A test compares the two on data with gaps, so a change to one fails until
 the other matches.
+
+## Model lifecycle
+
+Every Dagster refresh retrains, but the API keeps serving the current model unless the
+new one earns its place:
+
+1. **Train and test.** `ml/train.py` fits on the first 60% of the time range, calibrates
+   on the next 20%, and tests on the last 20%, with each boundary purged around the 30s
+   label.
+2. **Promote or keep.** Both models are scored (Brier) on the test rows newer than
+   everything the served model trained on (its `trained_through`). The new model
+   replaces it only if it does at least as well. With no served model, one that can't
+   be loaded, different features, or fewer than 200 such rows, the new one wins.
+3. **Record.** Every run is logged to MLflow with a `promoted` tag. Promoted runs become
+   registry versions of `cryptostream-direction`, and the newest has the `champion`
+   alias. `last_training.json` records the latest run either way; `/model/info` shows
+   the served model and that run.
+4. **Serve.** The API reloads when the model file changes.
+5. **Track live.** `ml/monitor.py` gives every finished live bar newer than
+   `trained_through` a call from the served model, and settles it when the bar 30s
+   later finishes. `/model/live` reports the hit rate and Brier score next to the best
+   constant guess in hindsight, for the current model and for the last 24 hours across
+   every served model. The dashboard shows the 24-hour figure, because every retrain
+   that ties or wins starts the current model's record from zero. It is kept in
+   memory; a restart rescores the hour of bars Kafka still holds.
+
+## Market summary
+
+After training, Dagster builds the market summary from the symbol snapshot and the
+served model's call on each symbol's newest warehouse bar (worded as a slight lean, with
+the model's held-out AUC). With `OPENAI_API_KEY` set, an LLM writes it from exactly
+those facts; otherwise, or if the call fails, a template does. It is saved as
+`market_summary.json` next to the warehouse, and the dashboard only reads that file,
+so the LLM runs once per refresh. Before Dagster's first run, the dashboard shows the
+offline template.
 
 ## Keeping the data honest
 

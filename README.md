@@ -71,6 +71,9 @@ make api         # FastAPI at http://localhost:8000  (docs at /docs)
 make dashboard   # Streamlit at http://localhost:8501
 ```
 
+The local `make` targets read `.env` when it exists, the same way Docker Compose does
+(copy `.env.example` to start one).
+
 To use real market history instead of synthetic bars (needs internet, no Docker):
 
 ```bash
@@ -115,12 +118,20 @@ make backfill     # optional: load 7 days of real history (about 3 minutes) so t
 - **`ml/train.py`** — LightGBM classifier with walk-forward CV, purged so no training
   label reaches into the test period, and probabilities calibrated on held-out data;
   logs params, metrics against simple baselines, feature importance and the model to MLflow.
-- **`ml/api/main.py`** — FastAPI service that hot-reloads the latest model and exposes
-  `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`, `/health`.
+  A new model replaces the served one only if it scores at least as well on data
+  neither has trained on.
+- **`ml/api/main.py`** — FastAPI service that hot-reloads the served model and exposes
+  `/predict`, `/predict/{symbol}`, `/symbols`, `/bars/{symbol}`, `/model/info`,
+  `/model/live`, `/health`.
+- **`ml/monitor.py`** — the live track record: every finished live bar gets a call from
+  the served model, settled 30 seconds later, counting only bars newer than its
+  training data. Served at `/model/live` and shown on the dashboard.
 - **`ml/live.py`** — keeps recent bars from Kafka in memory and computes the same
   indicators as dbt, so predictions use data seconds old, not the 15-minute warehouse.
-- **`llm/market_agent.py`** — turns the latest snapshot + model signal into a plain-
-  English market read; works offline, upgrades to an LLM narrative if a key is set.
+- **`llm/market_agent.py`** — turns the latest snapshot and the model's call on each
+  symbol into a plain-English market read; works offline, upgrades to an LLM narrative
+  if a key is set. Dagster saves it after each refresh, and the dashboard only reads
+  the saved copy, so the LLM runs once per refresh rather than once per page view.
 - **`orchestration/`** — Dagster asset DAG (`compact lake → load → dbt → model →
   summary`) with a 15-minute refresh schedule, plus the Binance history backfill.
 - **`dashboard/app.py`** — Streamlit: candlesticks + VWAP, indicators, live model call,

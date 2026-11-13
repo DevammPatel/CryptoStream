@@ -25,6 +25,7 @@ Run the UI:   dagster dev -m cryptostream_dagster.definitions
 Dagster inspects the `context` annotation at runtime, so this module must not use
 `from __future__ import annotations`.
 """
+import json
 import os
 import subprocess
 import sys
@@ -161,7 +162,10 @@ def dbt_models(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"stdout_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
 
 
-@asset(deps=[dbt_models], description="Train the direction classifier and log to MLflow.")
+@asset(
+    deps=[dbt_models],
+    description="Train the direction classifier, log it to MLflow, and serve it if it beats the current one.",
+)
 def ml_model(context: AssetExecutionContext) -> MaterializeResult:
     result = subprocess.run(
         [sys.executable, os.path.join(REPO, "ml", "train.py")],
@@ -173,18 +177,35 @@ def ml_model(context: AssetExecutionContext) -> MaterializeResult:
     if result.returncode != 0:
         context.log.error(result.stderr[-3000:])
         raise Exception("model training failed")
-    return MaterializeResult(metadata={"log_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")})
+    metadata = {"log_tail": MetadataValue.md(f"```\n{result.stdout[-1500:]}\n```")}
+    last_run = os.path.join(os.getenv("MODEL_DIR", os.path.join(REPO, "ml", "models")), "last_training.json")
+    if os.path.exists(last_run):
+        with open(last_run) as fh:
+            record = json.load(fh)
+        metadata["promoted"] = MetadataValue.bool(record["promotion"]["promoted"])
+        metadata["promotion_reason"] = MetadataValue.text(record["promotion"]["reason"])
+        metadata["test_auc"] = MetadataValue.float(record["metrics"]["test_auc"] or float("nan"))
+    return MaterializeResult(metadata=metadata)
 
 
-@asset(deps=[ml_model], description="Generate the LLM market summary.")
+@asset(deps=[ml_model], description="Write the market summary, with the model's calls, for the dashboard.")
 def market_summary(context: AssetExecutionContext) -> MaterializeResult:
     if REPO not in sys.path:
         sys.path.insert(0, REPO)
-    from llm.market_agent import generate_market_summary
+    from llm.market_agent import build_market_summary, save_market_summary
 
-    summary = generate_market_summary()
-    context.log.info(summary)
-    return MaterializeResult(metadata={"summary": MetadataValue.md(summary)})
+    record = build_market_summary()
+    path = save_market_summary(record)
+    context.log.info(record["text"])
+    if "llm_error" in record:
+        context.log.warning("LLM unavailable, saved the offline summary: %s", record["llm_error"])
+    return MaterializeResult(
+        metadata={
+            "summary": MetadataValue.md(record["text"]),
+            "source": MetadataValue.text(record["source"]),
+            "path": MetadataValue.path(path),
+        }
+    )
 
 
 refresh_job = define_asset_job("refresh_pipeline", selection="*")

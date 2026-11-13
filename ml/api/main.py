@@ -2,9 +2,12 @@
 
 Endpoints:
   GET  /health              liveness + whether a model is loaded
-  GET  /model/info          metrics + feature importance from the last training run
+  GET  /model/info          the served model's metrics and feature importance, plus the
+                            latest training run and whether it replaced the model
   POST /predict             predict from an explicit feature vector
   GET  /predict/{symbol}    predict from the newest finished bar for a symbol
+  GET  /model/live          live track record: calls on bars the model never trained
+                            on, settled 30s later (see monitor.py)
   GET  /symbols             symbols with live bars
   GET  /bars/{symbol}       recent live bars with indicators, including the one forming
 
@@ -18,9 +21,11 @@ is warming up or stale. Each response says which one it used in `source`.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
+import time
 
 import joblib
 import pandas as pd
@@ -34,30 +39,74 @@ if ML_DIR not in sys.path:
 
 from features import FEATURE_COLUMNS, duckdb_path, latest_feature_row  # noqa: E402
 from live import MAX_BARS, LiveBars, consume_bars  # noqa: E402
+from monitor import Scorecard, epoch_ms  # noqa: E402
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(ML_DIR, "models"))  # keep in sync with ml/train.py
 MODEL_PATH = os.path.join(MODEL_DIR, "direction_lgbm.pkl")
 META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
+LAST_RUN_PATH = os.path.join(MODEL_DIR, "last_training.json")
 
 app = FastAPI(title="CryptoStream Prediction API", version="1.0.0")
 
-_state: dict = {"model": None, "features": FEATURE_COLUMNS, "mtime": None}
+log = logging.getLogger("uvicorn.error")
+
+_state: dict = {
+    "model": None,
+    "features": FEATURE_COLUMNS,
+    "mtime": None,
+    "model_id": None,  # when the served model was trained
+    "trained_through_ms": None,  # the newest price it saw in training
+}
+_model_lock = threading.Lock()
 
 live_bars = LiveBars()
+scorecard = Scorecard()
 _stop_consumer = threading.Event()
 
 
 def _load_model() -> None:
     """(Re)load the model if the file changed on disk."""
-    if not os.path.exists(MODEL_PATH):
-        _state["model"] = None
-        return
-    mtime = os.path.getmtime(MODEL_PATH)
-    if _state["mtime"] != mtime:
+    with _model_lock:
+        if not os.path.exists(MODEL_PATH):
+            _state["model"] = None
+            return
+        mtime = os.path.getmtime(MODEL_PATH)
+        if _state["mtime"] == mtime:
+            return
         payload = joblib.load(MODEL_PATH)
+        meta = {}
+        if os.path.exists(META_PATH):  # train.py writes it before the model
+            with open(META_PATH) as fh:
+                meta = json.load(fh)
         _state["model"] = payload["model"]
         _state["features"] = payload.get("features", FEATURE_COLUMNS)
         _state["mtime"] = mtime
+        _state["model_id"] = meta.get("trained_at") or f"mtime-{mtime}"
+        _state["trained_through_ms"] = epoch_ms(meta.get("trained_through"))
+
+
+def _score_once(now_ms: int | None = None) -> None:
+    """Add the newest finished live bars to the track record, and settle older calls."""
+    _load_model()
+    # A model with no recorded training cutoff might be scored on its own training
+    # data, so it gets no track record.
+    model = _state["model"] if _state["trained_through_ms"] is not None else None
+    scorecard.step(
+        live_bars,
+        model,
+        _state["features"],
+        _state["model_id"],
+        _state["trained_through_ms"],
+        int(time.time() * 1000) if now_ms is None else now_ms,
+    )
+
+
+def _score_live_bars(stop: threading.Event) -> None:
+    while not stop.wait(5):
+        try:
+            _score_once()
+        except Exception:  # keep scoring after a bad batch
+            log.exception("live track record: scoring failed")
 
 
 @app.on_event("startup")
@@ -70,6 +119,7 @@ def _startup() -> None:
         threading.Thread(
             target=consume_bars, args=(live_bars, bootstrap, topic, _stop_consumer), daemon=True
         ).start()
+        threading.Thread(target=_score_live_bars, args=(_stop_consumer,), daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -128,7 +178,32 @@ def model_info() -> dict:
     if not os.path.exists(META_PATH):
         raise HTTPException(status_code=404, detail="No model metadata. Train the model first.")
     with open(META_PATH) as fh:
-        return json.load(fh)
+        info = json.load(fh)
+    # Training runs that didn't beat the served model are recorded here, not served.
+    if os.path.exists(LAST_RUN_PATH):
+        with open(LAST_RUN_PATH) as fh:
+            info["last_training"] = json.load(fh)
+    return info
+
+
+@app.get("/model/live")
+def model_live() -> dict:
+    """How the served model's calls on live bars turned out, 30 seconds later.
+
+    Only bars newer than its training data count. The baselines are the best constant
+    guess in hindsight, so beating them is a fair bar.
+    """
+    _load_model()
+    model_id = _state["model_id"]
+    return {
+        "model_id": model_id,
+        "counts_bars_after": None
+        if _state["trained_through_ms"] is None
+        else pd.Timestamp(_state["trained_through_ms"], unit="ms", tz="UTC").isoformat(),
+        "current_model": scorecard.summary(model_id),
+        "by_symbol": {s: scorecard.summary(model_id, symbol=s) for s in live_bars.symbols()},
+        "last_24h_all_models": scorecard.summary(),
+    }
 
 
 @app.post("/predict", response_model=Prediction)

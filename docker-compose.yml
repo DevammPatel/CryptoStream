@@ -160,6 +160,10 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
       RAW_RETENTION_DAYS: ${RAW_RETENTION_DAYS:-7}
+      # The market summary is written here, so the LLM settings live here too.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
     ports:
       - "3000:3000"
     volumes:
