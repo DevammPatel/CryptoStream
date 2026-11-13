@@ -78,3 +78,45 @@ def test_bars_take_open_and_close_by_trade_time_not_arrival(spark):
     second = by_key[("btcusdt", T0 + 10_000)]
     assert second["open"] == second["close"] == 102.0 and second["trade_count"] == 1
     assert by_key[("solusdt", T0)]["order_flow_imbalance"] == 1.0
+
+
+def test_bars_count_a_trade_sent_twice_once(spark, tmp_path):
+    """A second producer sends every trade twice. Spark only drops duplicates on a
+    stream, so this runs the bar logic as a stream: in both output modes the job uses,
+    with one copy in the same batch and one a batch later."""
+    import spark_stream
+
+    source = tmp_path / "trades"
+    source.mkdir()
+    first_batch = [
+        trade(1, 100.0, 1.0, 1_000, False),
+        trade(2, 101.0, 2.0, 2_000, True),
+        trade(1, 100.0, 1.0, 1_000, False),  # the same trade again
+        trade(1, 50.0, 3.0, 1_000, False, symbol="solusdt"),  # same id on another symbol: a different trade
+    ]
+    (source / "1.json").write_text("\n".join(first_batch))
+
+    def start(mode, rows):
+        raw = spark.readStream.option("maxFilesPerTrigger", 1).text(str(source))  # a `value` column, like Kafka
+        bars = spark_stream.compute_ohlcv(spark_stream.drop_duplicate_trades(spark_stream.parse_trades(raw)))
+        return (
+            bars.writeStream.outputMode(mode)
+            .foreachBatch(lambda batch, _: rows.extend(batch.collect()))
+            .option("checkpointLocation", str(tmp_path / f"chk-{mode}"))
+            .start()
+        )
+
+    live_rows, lake_rows = [], []
+    live, lake = start("update", live_rows), start("append", lake_rows)
+    for query in (live, lake):
+        query.processAllAvailable()
+    (source / "2.json").write_text(trade(1, 100.0, 1.0, 1_000, False))  # the copy, one batch later
+    for query in (live, lake):
+        query.processAllAvailable()
+        assert query.exception() is None
+        query.stop()
+
+    # Update mode re-sends a bar whenever it changes; the late copy changed nothing.
+    btc = [r for r in live_rows if r.symbol == "btcusdt"]
+    assert [(r.trade_count, r.volume) for r in btc] == [(2, 3.0)]
+    assert [r.trade_count for r in live_rows if r.symbol == "solusdt"] == [1]

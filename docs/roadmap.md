@@ -25,8 +25,6 @@
 - **Spark's live query saves progress to S3 every 2 seconds.** Each 2-second batch takes
   about 3 seconds, so live bars arrive about a second later than planned. A local
   checkpoint volume would remove most of that.
-- **Spark does not de-duplicate trades by id.** Two producers on one topic double the
-  volume (see [ingestion-notes.md](ingestion-notes.md)).
 - **One machine, no authentication.** The stack is for development and demos: no
   service asks for a password, so every port listens on the local machine only
   (`BIND_ADDRESS` opens them). The SeaweedFS key comes from `.env`.

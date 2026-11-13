@@ -14,6 +14,9 @@ instead of every 10 seconds costs nothing and makes six times fewer files. Updat
 publishes each bar while it is still forming, which is what the API and dashboard
 read for the live view.
 
+Both bar queries drop a trade they have already seen, so a second producer on the
+topic doesn't double the volume. The raw archive keeps every record as it arrived.
+
 The lake sinks keep their checkpoints in the lake. The live sink keeps its own on a
 local disk (CHECKPOINT_DIR): it commits every 2 seconds, and doing that over S3 made
 each batch take longer than the trigger. With no checkpoint yet, it starts from the
@@ -106,6 +109,16 @@ def parse_trades(raw):
     )
 
 
+def drop_duplicate_trades(trades):
+    """Each trade once, however many times it reached Kafka.
+
+    Two producers on one topic (Docker's and `make ingest-local`, say) send every
+    trade twice. Binance trade ids are unique per symbol, and a copy arrives within
+    seconds of the original, so Spark only remembers ids within the 30-second watermark.
+    """
+    return trades.dropDuplicatesWithinWatermark(["symbol", "trade_id"])
+
+
 def compute_ohlcv(trades):
     """10-second OHLCV + order-flow features per symbol."""
     signed_qty = F.when(F.col("is_buyer_maker"), -F.col("quantity")).otherwise(F.col("quantity"))
@@ -189,7 +202,7 @@ def main() -> None:
         .start()
     )
 
-    features = compute_ohlcv(trades)
+    features = compute_ohlcv(drop_duplicate_trades(trades))
     (
         features.writeStream.format("parquet")
         .option("path", f"s3a://{LAKE_BUCKET}/features/ohlcv_10s/")
@@ -200,7 +213,7 @@ def main() -> None:
         .start()
     )
 
-    live = compute_ohlcv(read_trades(spark, starting_offsets="latest"))
+    live = compute_ohlcv(drop_duplicate_trades(read_trades(spark, starting_offsets="latest")))
     (
         bars_to_kafka(live)
         .writeStream.format("kafka")
