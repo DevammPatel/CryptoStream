@@ -56,8 +56,9 @@ FILER = http://localhost:8888/buckets/$(LAKE_BUCKET)
 reset-bar-state:  ## Restart Spark's bar queries from scratch (once, after changing how bars are computed)
 	docker compose stop spark
 	curl -fsS -X DELETE "$(FILER)/_chk/ohlcv_10s/?recursive=true"
-	curl -fsS -X DELETE "$(FILER)/_chk/bars_live/?recursive=true"
 	curl -fsS -X DELETE "$(FILER)/features/ohlcv_10s/_spark_metadata/?recursive=true"
+	docker compose run --rm --no-deps -T --entrypoint rm spark -rf /checkpoints/bars_live
+	-@curl -sS -o /dev/null -X DELETE "$(FILER)/_chk/bars_live/?recursive=true"  # where it lived before
 	docker compose start spark
 
 dbt:  ## Run dbt models + tests

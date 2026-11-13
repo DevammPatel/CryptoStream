@@ -14,6 +14,12 @@ instead of every 10 seconds costs nothing and makes six times fewer files. Updat
 publishes each bar while it is still forming, which is what the API and dashboard
 read for the live view.
 
+The lake sinks keep their checkpoints in the lake. The live sink keeps its own on a
+local disk (CHECKPOINT_DIR): it commits every 2 seconds, and doing that over S3 made
+each batch take longer than the trigger. With no checkpoint yet, it starts from the
+newest trades rather than replaying what Kafka holds, since only recent bars matter
+to the live view.
+
 Run inside the `spark` container (see streaming/Dockerfile), which supplies the
 Kafka + Hadoop-AWS jars. Configure via env vars (see docker-compose.yml).
 """
@@ -39,6 +45,7 @@ LAKE_ENDPOINT = os.getenv("LAKE_ENDPOINT", "http://seaweedfs:8333")
 LAKE_ACCESS_KEY = os.getenv("LAKE_ACCESS_KEY", "lakeadmin")
 LAKE_SECRET_KEY = os.getenv("LAKE_SECRET_KEY", "lakeadmin")
 LAKE_BUCKET = os.getenv("LAKE_BUCKET", "crypto-lake")
+CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/checkpoints")
 
 TRADE_SCHEMA = StructType(
     [
@@ -73,12 +80,13 @@ def build_spark() -> SparkSession:
     return spark
 
 
-def read_trades(spark: SparkSession):
+def read_trades(spark: SparkSession, starting_offsets: str = "earliest"):
+    """The trade stream. starting_offsets only applies to a query with no checkpoint."""
     raw = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", TRADES_TOPIC)
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", starting_offsets)
         .option("maxOffsetsPerTrigger", 20000)
         # If the stack was off longer than Kafka's retention, carry on from what is
         # left. A gap in a live feed is better than a job that can never restart.
@@ -192,12 +200,13 @@ def main() -> None:
         .start()
     )
 
+    live = compute_ohlcv(read_trades(spark, starting_offsets="latest"))
     (
-        bars_to_kafka(features)
+        bars_to_kafka(live)
         .writeStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("topic", BARS_TOPIC)
-        .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/bars_live/")
+        .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "bars_live"))
         .outputMode("update")
         .trigger(processingTime="2 seconds")
         .start()
