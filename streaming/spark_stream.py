@@ -4,13 +4,15 @@ Reads the raw trade stream from Redpanda, computes windowed OHLCV + micro-struct
 features per symbol, and writes them as Parquet to the S3-compatible SeaweedFS lake.
 
 Three sinks:
-  1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, exactly-once via checkpoint)
-  2. 10s OHLCV features  -> s3a://<bucket>/features/ohlcv_10s/    (append)
+  1. Raw trades          -> s3a://<bucket>/raw/trades/            (append, every minute)
+  2. 10s OHLCV features  -> s3a://<bucket>/features/ohlcv_10s/    (append, every minute)
   3. Live bars           -> Kafka topic crypto.bars_10s           (update, every 2 seconds)
 
 Append only writes a bar once the watermark passes it, so the lake is complete but
-about a minute behind. Update publishes each bar while it is still forming, which is
-what the API and dashboard read for the live view.
+a minute or two behind. Only the 15-minute batch reads it, so writing once a minute
+instead of every 10 seconds costs nothing and makes six times fewer files. Update
+publishes each bar while it is still forming, which is what the API and dashboard
+read for the live view.
 
 Run inside the `spark` container (see streaming/Dockerfile), which supplies the
 Kafka + Hadoop-AWS jars. Configure via env vars (see docker-compose.yml).
@@ -96,16 +98,20 @@ def compute_ohlcv(trades):
     """10-second OHLCV + order-flow features per symbol."""
     signed_qty = F.when(F.col("is_buyer_maker"), -F.col("quantity")).otherwise(F.col("quantity"))
     notional = F.col("price") * F.col("quantity")
+    # Trades in a window can arrive in any order across partitions and batches, so open
+    # and close come from the earliest and latest trade time, with the trade id as a
+    # tie-break for trades in the same millisecond. first()/last() only see arrival order.
+    trade_order = F.struct("trade_time", "trade_id")
 
     agg = (
         trades.withColumn("signed_qty", signed_qty)
         .withColumn("notional", notional)
         .groupBy(F.window("event_ts", "10 seconds"), F.col("symbol"))
         .agg(
-            F.first("price", ignorenulls=True).alias("open"),
+            F.min_by("price", trade_order).alias("open"),
             F.max("price").alias("high"),
             F.min("price").alias("low"),
-            F.last("price", ignorenulls=True).alias("close"),
+            F.max_by("price", trade_order).alias("close"),
             F.sum("quantity").alias("volume"),
             F.sum("notional").alias("notional"),
             F.count("*").alias("trade_count"),
@@ -167,7 +173,7 @@ def main() -> None:
         .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/raw_trades/")
         .partitionBy("symbol")
         .outputMode("append")
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="1 minute")
         .start()
     )
 
@@ -178,7 +184,7 @@ def main() -> None:
         .option("checkpointLocation", f"s3a://{LAKE_BUCKET}/_chk/ohlcv_10s/")
         .partitionBy("symbol")
         .outputMode("append")
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="1 minute")
         .start()
     )
 

@@ -2,11 +2,21 @@
 
 Covered:
   - ingestion.normalise maps Binance payloads to the canonical schema
-  - synthetic data generation + DuckDB round-trip
+  - ingestion stops cleanly on SIGTERM and gives up only on errors retrying can't fix
+  - synthetic data generation + DuckDB round-trip, at a realistic and repeatable scale
+  - the market summary judges volatility against each symbol's own baseline
   - feature loading + train/label construction
   - model training produces a usable classifier and metadata
+  - CV splits never let a training label reach into the test period
+  - on data with no signal, calibrated probabilities stay near the base rate
   - Dagster definitions load and the refresh schedule is on
   - the warehouse swap keeps views working and never blocks a reader
+  - indicators and labels are time-based, identical in dbt and Python, across gaps
+  - duplicate copies of a bar collapse to the most complete one
+  - the Binance backfill rolls 1s klines into Spark-shaped 10s bars the pipeline can load
+  - bar times stay UTC whatever the time zone of the machine reading them
+  - compaction merges finished hours of Spark files, keeps every bar once, expires old trades
+  - compaction re-lists S3 instead of trusting a cached listing
   - live bars: indicators match dbt, partial and stale bars are ignored, Kafka consumer
   - API: predictions from live bars, warehouse fallback, /bars
 
@@ -48,6 +58,67 @@ def test_normalise_ignores_non_trade():
     assert normalise({"data": {"e": "depthUpdate"}}) is None
 
 
+def test_only_refusals_stop_reconnecting():
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatusCode
+
+    from ingestion.ws_producer import is_fatal
+
+    assert is_fatal(InvalidStatusCode(451, Headers()))
+    assert not is_fatal(InvalidStatusCode(503, Headers()))
+    assert not is_fatal(ConnectionResetError())
+
+
+def serve_fake_trades():
+    """A local WebSocket server that streams Binance-shaped trades. Returns its port."""
+    import asyncio
+    import json
+    import threading
+
+    import websockets
+
+    ready, state = threading.Event(), {}
+
+    async def handler(ws, *args):
+        trade_id = 0
+        while True:
+            trade_id += 1
+            data = {"e": "trade", "s": "BTCUSDT", "t": trade_id, "p": "62000.5", "q": "0.01", "T": 1700000000000, "m": False}
+            await ws.send(json.dumps({"stream": "btcusdt@trade", "data": data}))
+            await asyncio.sleep(0.05)
+
+    async def run():
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            state["port"] = server.sockets[0].getsockname()[1]
+            ready.set()
+            await asyncio.Future()
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    assert ready.wait(5)
+    return state["port"]
+
+
+def test_ingestion_stops_cleanly_on_sigterm(tmp_path):
+    import signal
+    import time
+
+    port = serve_fake_trades()
+    log_path = tmp_path / "ingestion.log"
+    env = dict(os.environ, BINANCE_WS_BASE=f"ws://127.0.0.1:{port}/stream?streams=", KAFKA_BOOTSTRAP="127.0.0.1:9")
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(REPO, "ingestion", "ws_producer.py")], env=env, stdout=log, stderr=log
+        )
+    deadline = time.time() + 15
+    while "connected to" not in log_path.read_text() and time.time() < deadline:
+        time.sleep(0.2)
+    assert "connected to" in log_path.read_text()
+
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=15) == 0
+    assert "shutting down after" in log_path.read_text()
+
+
 @pytest.fixture(scope="session")
 def sample_data(tmp_path_factory):
     db_path = str(tmp_path_factory.mktemp("wh") / "crypto.duckdb")
@@ -67,6 +138,35 @@ def test_sample_data_created(sample_data):
     n = con.execute("select count(*) from raw.ohlcv_10s").fetchone()[0]
     con.close()
     assert n > 500
+
+
+def test_sample_data_is_realistic_and_repeatable(tmp_path):
+    import duckdb
+    import numpy as np
+
+    closes = []
+    for run in range(2):
+        db = str(tmp_path / f"run{run}.duckdb")
+        subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "generate_sample_data.py"), "--minutes", "60", "--symbols", "btcusdt"],
+            check=True, cwd=REPO, env=dict(os.environ, DUCKDB_PATH=db), capture_output=True,
+        )
+        con = duckdb.connect(db, read_only=True)
+        closes.append(np.array([r[0] for r in con.execute("select close from raw.ohlcv_10s order by window_start").fetchall()]))
+        con.close()
+
+    assert np.allclose(closes[0], closes[1])  # same prices on every run
+    bar_vol = np.diff(np.log(closes[0])).std()
+    assert 0.0001 < bar_vol < 0.001  # real BTC moves roughly 0.02-0.03% per 10s bar
+
+
+def test_summary_judges_volatility_against_its_own_baseline():
+    from llm.market_agent import _describe
+
+    row = {"symbol": "btcusdt", "last_return": 0.0001, "px_vs_sma30": 0.001, "order_flow_imbalance": 0.0}
+    assert "elevated volatility" in _describe({**row, "volatility_30": 0.0006, "typical_volatility_30": 0.0003})
+    assert "subdued volatility" in _describe({**row, "volatility_30": 0.0001, "typical_volatility_30": 0.0003})
+    assert "normal volatility" in _describe({**row, "volatility_30": 0.0003, "typical_volatility_30": 0.0003})
 
 
 def test_feature_frame(sample_data):
@@ -94,6 +194,38 @@ def test_training_runs(sample_data, model_dir, tmp_path):
     assert result.returncode == 0, result.stderr
     assert os.path.exists(os.path.join(model_dir, "direction_lgbm.pkl"))
     assert os.path.exists(os.path.join(model_dir, "model_meta.json"))
+
+
+def test_purged_splits_never_leak():
+    import numpy as np
+    from train import HORIZON_NS, purged_splits
+
+    # two symbols sharing one clock of 10s bars
+    t = np.repeat(np.arange(0, 2000) * 10 * 10**9, 2)
+    folds = list(purged_splits(t))
+    assert len(folds) == 5
+    for train, test in folds:
+        assert t[train].max() + HORIZON_NS < t[test].min()
+
+
+def test_epoch_ns_is_nanoseconds_whatever_the_input_unit():
+    import pandas as pd
+    from train import epoch_ns
+
+    for unit in ("us", "ns"):
+        times = pd.Series(pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 00:00:30"]).as_unit(unit))
+        assert int(epoch_ns(times)[1] - epoch_ns(times)[0]) == 30 * 10**9
+
+
+def test_calibrated_model_claims_no_edge_on_noise(sample_data, model_dir):
+    import json
+
+    meta = json.load(open(os.path.join(model_dir, "model_meta.json")))
+    metrics = meta["metrics"]
+    assert metrics["calibrated"] is True
+    # the sample data is a random walk: an honest model stays close to 50/50
+    assert metrics["test_prob_std"] < 0.1
+    assert metrics["test_brier"] < metrics["test_brier_baseline"] + 0.01
 
 
 def test_prediction_from_model(sample_data, model_dir):
@@ -137,6 +269,233 @@ def test_warehouse_swap_keeps_views_and_readers(sample_data, tmp_path, monkeypat
     assert con.execute("select count(*) from intermediate.int_technical_features").fetchone()[0] > 0
     assert con.execute("select count(*) from marts.mart_ml_features").fetchone()[0] > 0
     con.close()
+
+
+def lake_with_gaps(tmp_path):
+    """The btcusdt sample bars with a 50s outage, every 17th bar missing, and a few bars
+    written twice: a partial copy, as Spark leaves when it replays a batch."""
+    import glob
+
+    import numpy as np
+    import pandas as pd
+
+    files = glob.glob(os.path.join(REPO, "data", "lake", "features", "ohlcv_10s", "symbol=btcusdt", "*.parquet"))
+    bars = pd.concat([pd.read_parquet(f) for f in files]).sort_values("window_start").reset_index(drop=True)
+    keep = np.ones(len(bars), dtype=bool)
+    keep[100:105] = False
+    keep[::17] = False
+    lake = tmp_path / "lake"
+    (lake / "symbol=btcusdt").mkdir(parents=True)
+    bars[keep].to_parquet(lake / "symbol=btcusdt" / "part-0.parquet", index=False)
+    partial = bars[keep].iloc[200:210].assign(trade_count=lambda d: d["trade_count"] - 5, close=lambda d: d["close"] * 1.01)
+    partial.to_parquet(lake / "symbol=btcusdt" / "part-1.parquet", index=False)
+    return str(lake)
+
+
+def test_indicators_and_labels_match_dbt_across_gaps(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    import numpy as np
+    import pandas as pd
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+    from features import FEATURE_COLUMNS, _build_from_raw, one_bar_per_window, with_indicators
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("LAKE_URI", lake_with_gaps(tmp_path))
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    con = duckdb.connect(str(served), read_only=True)
+    raw = con.execute("select * from raw.ohlcv_10s").df()
+    sql = con.execute("select * from intermediate.int_technical_features order by window_start").df()
+    mart = con.execute("select * from marts.mart_ml_features order by window_start").df()
+    fallback = _build_from_raw(con).sort_values("window_start").reset_index(drop=True)
+    con.close()
+
+    assert raw.duplicated(["symbol", "window_start"]).sum() == 10
+    assert not sql.duplicated(["symbol", "window_start"]).any()
+    copies = raw[raw.duplicated(["symbol", "window_start"], keep=False)]
+    partial = copies.sort_values("trade_count").drop_duplicates("window_start")
+    assert not sql["close"].isin(partial["close"]).any()  # the complete copy won
+    py = with_indicators(one_bar_per_window(raw))
+    assert len(py) == len(sql)
+    for column in FEATURE_COLUMNS:
+        np.testing.assert_allclose(py[column], sql[column], rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=column)
+
+    # A gap breaks the return instead of comparing prices on either side of it.
+    after_gap = sql["window_start"].diff() > pd.Timedelta(seconds=10)
+    assert after_gap.sum() > 5
+    assert sql.loc[after_gap, "ret_1"].isna().all()
+
+    # Labels only come from the bar exactly 30s later, in dbt and in the Python fallback.
+    assert mart["window_start"].add(pd.Timedelta(seconds=30)).isin(set(sql["window_start"])).all()
+    assert len(fallback) == len(mart)
+    assert (fallback["label_up_3"].to_numpy() == mart["label_up_3"].to_numpy()).all()
+
+
+def kline(open_ms, o, h, low, c, volume, trades, taker_buy):
+    """One Binance 1s kline row: the fields the backfill reads, quote volume = volume * close."""
+    return [open_ms, str(o), str(h), str(low), str(c), str(volume), open_ms + 999,
+            str(volume * c), trades, str(taker_buy), str(taker_buy * c), "0"]
+
+
+def test_backfill_rolls_klines_into_spark_shaped_bars():
+    from cryptostream_dagster.backfill import COLUMNS, bars_from_klines
+
+    t0 = 1_700_000_000_000
+    rows = [
+        kline(t0, 100, 101, 99, 100.5, 2.0, 10, 1.5),
+        kline(t0 + 1000, 100.5, 103, 100, 102, 1.0, 5, 0.0),
+        kline(t0 + 2000, 102, 102, 102, 102, 0.0, 0, 0.0),        # no trades: ignored
+        kline(t0 + 10_000, 102, 102.5, 101.5, 101.8, 4.0, 8, 3.0),  # next 10s window
+    ]
+    bars = bars_from_klines(rows)
+    assert list(bars.columns) == COLUMNS
+    first = bars.iloc[0]
+    assert (first["open"], first["high"], first["low"], first["close"]) == (100, 103, 99, 102)
+    assert first["volume"] == 3.0 and first["trade_count"] == 15
+    assert first["net_signed_volume"] == 2 * 1.5 - 3.0  # taker buys minus the rest
+    assert abs(first["vwap"] - (2.0 * 100.5 + 1.0 * 102) / 3.0) < 1e-9
+    assert (bars["window_end"] - bars["window_start"]).dt.total_seconds().eq(10).all()
+    assert len(bars) == 2
+
+    # The bulk files use microseconds; the result must be the same.
+    in_us = [[r[0] * 1000, *r[1:]] for r in rows]
+    assert bars_from_klines(in_us).equals(bars)
+
+
+def test_backfill_files_load_next_to_spark_files(sample_data, tmp_path, monkeypatch):
+    import duckdb
+    import pandas as pd
+    from cryptostream_dagster.backfill import bars_from_klines, write_day
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    lake = lake_with_gaps(tmp_path)
+    monkeypatch.setenv("LAKE_URI", lake)
+    monkeypatch.setenv("DUCKDB_PATH", str(tmp_path / "crypto.duckdb"))
+    t0 = 1_600_000_000_000  # far from the sample bars, so nothing overlaps
+    rows = [kline(t0 + i * 1000, 100, 101, 99, 100, 1.0, 3, 0.5) for i in range(60)]
+    con = duckdb.connect()
+    write_day(con, bars_from_klines(rows), "btcusdt", "2020-09-13")
+    con.close()
+
+    assert materialize([lake_to_duckdb, dbt_models]).success
+    con = duckdb.connect(str(tmp_path / "crypto.duckdb"), read_only=True)
+    backfilled = con.execute(
+        "select count(*) from intermediate.int_technical_features where window_start < ?", [pd.Timestamp(t0 + 3_600_000, unit="ms")]
+    ).fetchone()[0]
+    con.close()
+    assert backfilled == 6
+
+
+def test_bar_times_stay_utc_in_any_reader_time_zone(tmp_path, monkeypatch):
+    import duckdb
+    import pandas as pd
+    from cryptostream_dagster.definitions import dbt_models, lake_to_duckdb
+    from dagster import materialize
+
+    # A time-zone-aware file next to a plain one, in summer, when London is UTC+1.
+    lake = tmp_path / "lake" / "symbol=btcusdt"
+    lake.mkdir(parents=True)
+    bar = {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0, "vwap": 1.0,
+           "trade_count": 1, "net_signed_volume": 0.0, "order_flow_imbalance": 0.0}
+    aware = pd.date_range("2026-07-01 12:00", periods=40, freq="10s", tz="UTC")
+    pd.DataFrame({"window_start": aware, "window_end": aware + pd.Timedelta(seconds=10), **bar}).to_parquet(lake / "a.parquet")
+    plain = aware.tz_localize(None) + pd.Timedelta(minutes=10)
+    pd.DataFrame({"window_start": plain, "window_end": plain + pd.Timedelta(seconds=10), **bar}).to_parquet(lake / "b.parquet")
+
+    served = tmp_path / "crypto.duckdb"
+    monkeypatch.setenv("LAKE_URI", str(tmp_path / "lake"))
+    monkeypatch.setenv("DUCKDB_PATH", str(served))
+    assert materialize([lake_to_duckdb, dbt_models]).success
+
+    con = duckdb.connect(str(served), read_only=True)
+    con.execute("SET TimeZone = 'Europe/London'")
+    first, last = con.execute("select min(window_start), max(window_start) from staging.stg_ohlcv").fetchone()
+    con.close()
+    assert str(first) == "2026-07-01 12:00:00"
+    assert str(last) == "2026-07-01 12:16:30"
+
+
+def spark_lake(tmp_path, now):
+    """Spark-shaped files: a file per minute of bars over the last 3 hours, a duplicate
+    partial copy of some bars, and raw trades from 9 days ago and from now."""
+    import pandas as pd
+
+    root = tmp_path / "lake"
+    feats = root / "features" / "ohlcv_10s" / "symbol=btcusdt"
+    trades = root / "raw" / "trades" / "symbol=btcusdt"
+    feats.mkdir(parents=True)
+    trades.mkdir(parents=True)
+    start = pd.Timestamp(now).tz_localize(None).floor("h") - pd.Timedelta(hours=2)
+    bars = pd.DataFrame({"window_start": pd.date_range(start, now.replace(tzinfo=None), freq="10s", inclusive="left")})
+    bars["window_end"] = bars["window_start"] + pd.Timedelta(seconds=10)
+    bars = bars.assign(open=1.0, high=1.0, low=1.0, close=1.0, volume=2.0, vwap=1.0, trade_count=10,
+                       net_signed_volume=0.0, order_flow_imbalance=0.0)
+    for i, (_, minute) in enumerate(bars.groupby(bars["window_start"].dt.floor("min"))):
+        minute.to_parquet(feats / f"part-{i:05d}.parquet", index=False)
+    bars.iloc[:30].assign(trade_count=4, close=9.0).to_parquet(feats / "part-replay.parquet", index=False)
+    pd.DataFrame({"x": [1]}).to_parquet(feats / "backfill-2026-01-01.parquet", index=False)
+    for name, when in (("old", pd.Timestamp(now).tz_localize(None) - pd.Timedelta(days=9)), ("new", start)):
+        pd.DataFrame({"trade_id": [1, 2], "price": [1.0, 1.0], "quantity": [1.0, 1.0], "trade_time": [0, 0],
+                      "is_buyer_maker": [False, True], "ingest_time": [0, 0], "event_ts": [when, when]}
+                     ).to_parquet(trades / f"part-{name}.parquet", index=False)
+    return root, feats, trades, bars
+
+
+def test_compaction_merges_finished_hours_and_expires_old_trades(tmp_path):
+    from datetime import datetime, timezone
+
+    import duckdb
+    from cryptostream_dagster.compaction import compact_lake
+
+    now = datetime(2026, 11, 11, 15, 25, tzinfo=timezone.utc)
+    root, feats, trades, bars = spark_lake(tmp_path, now)
+    uri = str(root / "features" / "ohlcv_10s")
+    con = duckdb.connect()
+    summary = compact_lake(con, uri, now=now)
+
+    names = sorted(p.name for p in feats.iterdir())
+    assert "compact-2026111113.parquet" in names and "compact-2026111114.parquet" in names
+    assert "backfill-2026-01-01.parquet" in names               # not Spark's, left alone
+    open_hour = [n for n in names if n.startswith("part-")]
+    assert len(open_hour) == 25                                  # 15:00-15:25 is still being written
+    assert summary[uri]["written_files"] == 2
+
+    lake = con.execute(  # compact-* and part-* files, not the backfill file
+        f"select * from read_parquet('{feats}/[cp][oa]*.parquet', union_by_name=true, hive_partitioning=false)"
+    ).df()
+    assert len(lake) == len(bars)                                # every bar once, nothing lost
+    assert lake["window_start"].is_unique
+    assert (lake["trade_count"] == 10).all()                     # the complete copy won over the replay
+
+    # A late file for a finished hour is folded into that hour's compact file.
+    bars.iloc[[5]].assign(trade_count=11).to_parquet(feats / "part-late.parquet", index=False)
+    compact_lake(con, uri, now=now)
+    first_hour = con.execute(f"select trade_count from read_parquet('{feats}/compact-2026111113.parquet') order by window_start").df()
+    assert len(first_hour) == 360 and first_hour["trade_count"].iloc[5] == 11
+    assert not (feats / "part-late.parquet").exists()
+
+    # Raw trades: the 9-day-old hour is past the 7-day retention and is gone.
+    trade_files = sorted(p.name for p in trades.iterdir())
+    assert trade_files == ["compact-2026111113.parquet"]
+    con.close()
+
+
+def test_compaction_never_trusts_a_cached_s3_listing(monkeypatch):
+    """DuckDB writes the merged file straight to S3, so s3fs must list the bucket again
+    to find it. A cached listing made the move fail with FileNotFoundError."""
+    from cryptostream_dagster.compaction import filesystem
+
+    monkeypatch.setenv("LAKE_ACCESS_KEY", "test")
+    monkeypatch.setenv("LAKE_SECRET_KEY", "test")
+    monkeypatch.setenv("LAKE_ENDPOINT", "http://localhost:1")
+    uri = "s3://crypto-lake/features/ohlcv_10s"
+    fs = filesystem(uri)
+    fs.dircache["crypto-lake/features"] = [{"name": "crypto-lake/features/a", "size": 0, "type": "file"}]
+    assert "crypto-lake/features" not in fs.dircache
+    assert filesystem(uri) is not fs  # no shared instance carrying state between runs
 
 
 def make_bars(n, end_ms, symbol="btcusdt"):
@@ -285,6 +644,15 @@ def test_api_predicts_from_live_bars(api):
     assert len(rows) == 5
     assert rows[-1]["rel_volume"] > 0
     assert client.get("/bars/dogeusdt").status_code == 404
+
+
+def test_api_requires_every_feature(api):
+    from features import FEATURE_COLUMNS
+
+    main, client = api
+    assert client.post("/predict", json={"ret_1": 0.001}).status_code == 422
+    body = client.post("/predict", json={c: 0.1 for c in FEATURE_COLUMNS}).json()
+    assert body["source"] == "request"
 
 
 def test_api_falls_back_to_warehouse(api):

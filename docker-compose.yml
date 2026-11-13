@@ -94,6 +94,9 @@ services:
       KAFKA_BOOTSTRAP: redpanda:29092
       SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
       TRADES_TOPIC: ${TRADES_TOPIC:-crypto.trades}
+      BINANCE_WS_BASE: ${BINANCE_WS_BASE:-wss://data-stream.binance.vision/stream?streams=}
+    # Time to close the WebSocket and flush Kafka before Docker kills the process.
+    stop_grace_period: 20s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -155,6 +158,8 @@ services:
       DUCKDB_PATH: /data/warehouse/crypto.duckdb
       MODEL_DIR: /models
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      SYMBOLS: ${SYMBOLS:-btcusdt,ethusdt,solusdt}
+      RAW_RETENTION_DAYS: ${RAW_RETENTION_DAYS:-7}
     ports:
       - "3000:3000"
     volumes:

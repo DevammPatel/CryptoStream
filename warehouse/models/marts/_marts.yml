@@ -24,3 +24,5 @@ models:
           - unique
       - name: last_price
         tests: [not_null]
+      - name: typical_volatility_30
+        description: "Median volatility_30 over the window, the baseline for 'elevated' or 'subdued'."

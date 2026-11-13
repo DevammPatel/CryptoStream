@@ -1,4 +1,4 @@
-.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster dbt test lint fmt seed
+.PHONY: help up down logs ps clean ingest-local features train api dashboard dagster refresh backfill backfill-local reset-bar-state dbt test lint fmt seed
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -39,6 +39,25 @@ dashboard:  ## Run the Streamlit dashboard locally
 
 dagster:  ## Run the Dagster UI and the 15-minute schedule
 	dagster dev -m cryptostream_dagster.definitions
+
+refresh:  ## Run the Dagster pipeline once, locally: lake -> dbt -> model -> summary
+	dagster asset materialize --select '*' -m cryptostream_dagster.definitions
+
+DAYS ?= 7
+backfill:  ## Load DAYS (default 7) of real Binance history into the Docker lake
+	docker compose exec dagster python -m cryptostream_dagster.backfill --days $(DAYS)
+
+backfill-local:  ## Load DAYS of real Binance history into data/lake (use instead of `make seed`)
+	python -m cryptostream_dagster.backfill --days $(DAYS)
+
+LAKE_BUCKET ?= crypto-lake
+FILER = http://localhost:8888/buckets/$(LAKE_BUCKET)
+reset-bar-state:  ## Restart Spark's bar queries from scratch (once, after changing how bars are computed)
+	docker compose stop spark
+	curl -fsS -X DELETE "$(FILER)/_chk/ohlcv_10s/?recursive=true"
+	curl -fsS -X DELETE "$(FILER)/_chk/bars_live/?recursive=true"
+	curl -fsS -X DELETE "$(FILER)/features/ohlcv_10s/_spark_metadata/?recursive=true"
+	docker compose start spark
 
 dbt:  ## Run dbt models + tests
 	cd warehouse && dbt build --profiles-dir .

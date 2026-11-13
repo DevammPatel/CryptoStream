@@ -18,6 +18,10 @@ import duckdb
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DUCKDB = os.path.join(HERE, "data", "warehouse", "crypto.duckdb")
 
+# Volatility is judged against the symbol's own median, since a fixed level means
+# very different things for BTC and SOL.
+VOL_HIGH, VOL_LOW = 1.5, 0.67
+
 
 def _duckdb_path() -> str:
     return os.getenv("DUCKDB_PATH", DEFAULT_DUCKDB)
@@ -33,7 +37,7 @@ def load_snapshot() -> list[dict]:
         if not exists:
             return []
         rows = con.execute(
-            "select symbol, last_price, last_return, px_vs_sma30, volatility_30, "
+            "select symbol, last_price, last_return, px_vs_sma30, volatility_30, typical_volatility_30, "
             "order_flow_imbalance, rel_volume from marts.mart_symbol_snapshot order by symbol"
         ).df()
     finally:
@@ -46,9 +50,15 @@ def _describe(row: dict) -> str:
     ret = (row.get("last_return") or 0) * 100
     trend = "above" if (row.get("px_vs_sma30") or 0) > 0 else "below"
     vol = row.get("volatility_30") or 0
+    typical = row.get("typical_volatility_30") or 0
     ofi = row.get("order_flow_imbalance") or 0
     flow = "net buying" if ofi > 0.05 else "net selling" if ofi < -0.05 else "balanced flow"
-    vol_word = "elevated" if vol > 0.004 else "subdued"
+    if typical and vol > VOL_HIGH * typical:
+        vol_word = "elevated"
+    elif typical and vol < VOL_LOW * typical:
+        vol_word = "subdued"
+    else:
+        vol_word = "normal"
     momentum = "bullish" if trend == "above" else "bearish"
     return (
         f"{sym}: last move {ret:+.2f}%, trading {trend} its 30-bar average ({momentum} momentum), "

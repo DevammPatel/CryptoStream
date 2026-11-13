@@ -1,5 +1,10 @@
 -- Rolling technical indicators computed with window functions over the 10s bars.
 -- This is the analytics feature table that both the dashboard and ML pipeline consume.
+-- Keep in sync with with_indicators() in ml/features.py; a test compares the two.
+--
+-- Windows are measured in time, not rows, so a gap in the feed (a quiet symbol, or the
+-- stack being off) never stretches "the last 30 bars" across hours, and a return only
+-- exists when the previous bar is exactly 10 seconds earlier.
 with base as (
     select * from {{ ref('stg_ohlcv') }}
 ),
@@ -7,8 +12,10 @@ with base as (
 with_returns as (
     select
         *,
-        close / nullif(lag(close) over w, 0) - 1                        as ret_1,
-        ln(close / nullif(lag(close) over w, 0))                        as log_ret_1
+        case when window_start - lag(window_start) over w = interval 10 seconds
+             then close / nullif(lag(close) over w, 0) - 1 end          as ret_1,
+        case when window_start - lag(window_start) over w = interval 10 seconds
+             then ln(close / nullif(lag(close) over w, 0)) end          as log_ret_1
     from base
     window w as (partition by symbol order by window_start)
 ),
@@ -16,17 +23,19 @@ with_returns as (
 with_ma as (
     select
         *,
-        avg(close) over (partition by symbol order by window_start
-            rows between 5 preceding and current row)                  as sma_6,
-        avg(close) over (partition by symbol order by window_start
-            rows between 29 preceding and current row)                 as sma_30,
-        stddev_samp(log_ret_1) over (partition by symbol order by window_start
-            rows between 29 preceding and current row)                 as volatility_30,
-        avg(order_flow_imbalance) over (partition by symbol order by window_start
-            rows between 5 preceding and current row)                  as ofi_6,
-        avg(volume) over (partition by symbol order by window_start
-            rows between 29 preceding and current row)                 as avg_volume_30
+        avg(close) over w6                                             as sma_6,
+        avg(close) over w30                                            as sma_30,
+        stddev_samp(log_ret_1) over w30                                as volatility_30,
+        avg(order_flow_imbalance) over w6                              as ofi_6,
+        avg(volume) over w30                                           as avg_volume_30
     from with_returns
+    window
+        -- 30 bars when none are missing: this one and the 29 before it
+        w30 as (partition by symbol order by window_start
+                range between interval 290 seconds preceding and current row),
+        -- 6 bars when none are missing
+        w6 as (partition by symbol order by window_start
+               range between interval 50 seconds preceding and current row)
 )
 
 select

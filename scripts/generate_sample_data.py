@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import duckdb
@@ -25,10 +27,13 @@ START_PRICES = {"btcusdt": 62000.0, "ethusdt": 3400.0, "solusdt": 145.0}
 
 
 def simulate_symbol(symbol: str, start_price: float, n: int, start_ts: datetime) -> pd.DataFrame:
-    """Geometric-brownian-motion-ish 10s OHLCV bars with plausible micro-structure."""
-    rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
-    dt = 10.0 / (60 * 60 * 24)  # 10 seconds in days
-    mu, sigma = 0.05, 0.9       # annualised drift / vol
+    """Geometric-brownian-motion-ish 10s OHLCV bars with plausible micro-structure.
+
+    The seed comes from the symbol name, so every run produces the same prices.
+    """
+    rng = np.random.default_rng(zlib.crc32(symbol.encode()))
+    dt = 10.0 / (60 * 60 * 24 * 365)  # 10 seconds, in years
+    mu, sigma = 0.05, 0.5             # annualised drift / vol: about 0.03% per 10s bar, close to real BTC
     shocks = rng.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), n)
     close = start_price * np.exp(np.cumsum(shocks))
     open_ = np.concatenate([[start_price], close[:-1]])
@@ -70,7 +75,8 @@ def main() -> None:
 
     symbols = [s.strip().lower() for s in args.symbols.split(",") if s.strip()]
     n = args.minutes * 6  # 6 ten-second bars per minute
-    start_ts = datetime.now(timezone.utc) - timedelta(minutes=args.minutes)
+    # Plain UTC timestamps, like the ones Spark and the backfill write.
+    start_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=args.minutes)
 
     os.makedirs(LAKE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)
@@ -79,8 +85,13 @@ def main() -> None:
     for sym in symbols:
         df = simulate_symbol(sym, START_PRICES.get(sym, 100.0), n, start_ts)
         part_dir = os.path.join(LAKE_DIR, f"symbol={sym}")
-        os.makedirs(part_dir, exist_ok=True)
-        df.drop(columns=["symbol"]).to_parquet(os.path.join(part_dir, "part-000.parquet"), index=False)
+        # Replace, don't add: mixing synthetic prices with real or older bars would
+        # give nonsense. The live lake lives in SeaweedFS, not here.
+        shutil.rmtree(part_dir, ignore_errors=True)
+        os.makedirs(part_dir)
+        # Named apart from Spark's part-* files and the backfill's files, so it never
+        # gets mistaken for real data.
+        df.drop(columns=["symbol"]).to_parquet(os.path.join(part_dir, "sample.parquet"), index=False)
         frames.append(df)
         print(f"  {sym}: {len(df):,} bars")
 

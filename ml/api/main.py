@@ -78,20 +78,22 @@ def _shutdown() -> None:
 
 
 class Features(BaseModel):
-    ret_1: float = 0.0
-    log_ret_1: float = 0.0
-    px_vs_sma30: float = 0.0
-    volatility_30: float = Field(0.0, ge=0)
-    order_flow_imbalance: float = 0.0
-    ofi_6: float = 0.0
-    rel_volume: float = Field(1.0, ge=0)
-    trade_count: float = Field(0.0, ge=0)
+    """Every feature is required: a default would quietly predict from made-up values."""
+
+    ret_1: float
+    log_ret_1: float
+    px_vs_sma30: float
+    volatility_30: float = Field(ge=0)
+    order_flow_imbalance: float
+    ofi_6: float
+    rel_volume: float = Field(ge=0)
+    trade_count: float = Field(ge=0)
 
 
 class Prediction(BaseModel):
-    prob_up: float
+    prob_up: float                # calibrated: how often "up" happened at this score
     direction: str
-    confidence: float
+    confidence: float             # distance of prob_up from 50/50, scaled to 0-1
     source: str = "request"       # request, live or warehouse
     as_of: str | None = None      # start of the bar the features came from
 

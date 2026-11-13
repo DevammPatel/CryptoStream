@@ -1,7 +1,10 @@
 """Dagster orchestration for the CryptoStream batch layer.
 
 Assets (DAG):
-    lake_to_duckdb  ->  dbt_models  ->  ml_model  ->  market_summary
+    compact_lake  ->  lake_to_duckdb  ->  dbt_models  ->  ml_model  ->  market_summary
+
+`compact_lake` merges each finished hour of Spark's small files and expires old raw
+trades (see compaction.py).
 
 `lake_to_duckdb` loads the Parquet feature lake (written by Spark, or by the sample
 generator) into a fresh build copy of the warehouse. dbt builds staging/marts in that
@@ -38,6 +41,8 @@ from dagster import (
     asset,
     define_asset_job,
 )
+
+from cryptostream_dagster import compaction
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WAREHOUSE_DIR = os.path.join(REPO, "warehouse")
@@ -86,7 +91,19 @@ def publish_warehouse() -> None:
     os.replace(build, served_path())
 
 
-@asset(description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
+@asset(description="Merge each finished hour of Spark's small lake files, and expire old raw trades.")
+def compact_lake(context: AssetExecutionContext) -> MaterializeResult:
+    con = duckdb.connect()
+    try:
+        connect_lake_storage(con)
+        summary = compaction.compact_lake(con, lake_uri())
+    finally:
+        con.close()
+    context.log.info("compaction: %s", summary)
+    return MaterializeResult(metadata={"summary": MetadataValue.json(summary)})
+
+
+@asset(deps=[compact_lake], description="Load the Parquet feature lake into raw.ohlcv_10s in a fresh build copy.")
 def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
     build = build_path()
     os.makedirs(os.path.dirname(build), exist_ok=True)
@@ -104,11 +121,20 @@ def lake_to_duckdb(context: AssetExecutionContext) -> MaterializeResult:
                 f"No parquet found under {lake_uri()}. Run the sample generator or start the Spark job."
             )
         con.execute("CREATE SCHEMA raw;")
-        # hive_partitioning recovers the symbol=... partition column from the path.
+        # Store every bar time as plain UTC. A time-zone-aware file would otherwise be
+        # converted later, in whichever session reads the views, using that machine's
+        # zone: on a Mac in BST every bar would shift by an hour.
+        con.execute("SET TimeZone = 'UTC';")
+        # hive_partitioning recovers the symbol=... partition column from the path, and
+        # union_by_name lines up columns by name across Spark, backfill and sample files.
         con.execute(
             f"""
             CREATE TABLE raw.ohlcv_10s AS
-            SELECT * FROM read_parquet('{parquet}', hive_partitioning=true)
+            SELECT * REPLACE (
+                CAST(window_start AS TIMESTAMP) AS window_start,
+                CAST(window_end AS TIMESTAMP) AS window_end
+            )
+            FROM read_parquet('{parquet}', hive_partitioning=true, union_by_name=true)
             """
         )
         n = con.execute("SELECT count(*) FROM raw.ohlcv_10s").fetchone()[0]
@@ -171,7 +197,7 @@ refresh_schedule = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[lake_to_duckdb, dbt_models, ml_model, market_summary],
+    assets=[compact_lake, lake_to_duckdb, dbt_models, ml_model, market_summary],
     jobs=[refresh_job],
     schedules=[refresh_schedule],
 )

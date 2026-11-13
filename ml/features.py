@@ -40,48 +40,52 @@ def _table_exists(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> bo
     return con.execute(q, [schema, table]).fetchone()[0] > 0
 
 
+def one_bar_per_window(bars: pd.DataFrame) -> pd.DataFrame:
+    """Drop degenerate bars and duplicate copies, keeping the most complete one.
+
+    Keep in sync with stg_ohlcv.sql.
+    """
+    bars = bars[(bars["close"] > 0) & (bars["volume"] > 0)]
+    bars = bars.sort_values(["trade_count", "volume"], ascending=False)
+    return bars.drop_duplicates(["symbol", "window_start"]).sort_values(["symbol", "window_start"])
+
+
+def with_indicators(bars: pd.DataFrame) -> pd.DataFrame:
+    """Indicators for one symbol's bars. Keep in sync with int_technical_features.sql.
+
+    Windows are measured in time, not rows: a 300s window holds the last 30 bars when
+    none are missing, and a return only exists when the previous bar is exactly 10
+    seconds earlier. window_start may be a timestamp or epoch milliseconds.
+    """
+    df = bars[(bars["close"] > 0) & (bars["volume"] > 0)].sort_values("window_start").reset_index(drop=True)
+    t = df["window_start"]
+    df["_t"] = pd.to_datetime(t, unit="ms") if pd.api.types.is_integer_dtype(t) else pd.to_datetime(t)
+    follows = (df["_t"] - df["_t"].shift(1)) == pd.Timedelta(seconds=10)
+    previous = df["close"].shift(1).where(follows)
+    df["ret_1"] = df["close"] / previous - 1
+    df["log_ret_1"] = np.log(df["close"] / previous)
+    w30, w6 = df.rolling("300s", on="_t"), df.rolling("60s", on="_t")
+    df["px_vs_sma30"] = df["close"] / w30["close"].mean() - 1
+    df["volatility_30"] = df.rolling("300s", on="_t", min_periods=2)["log_ret_1"].std(ddof=1)
+    df["ofi_6"] = w6["order_flow_imbalance"].mean()
+    df["rel_volume"] = df["volume"] / w30["volume"].mean()
+    return df.drop(columns="_t")
+
+
 def _build_from_raw(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    """Recreate the mart logic in SQL if dbt hasn't been run."""
-    return con.execute(
-        """
-        with base as (
-            select * from raw.ohlcv_10s where close > 0 and volume > 0
-        ),
-        -- layer 1: simple returns (single window level)
-        rets as (
-            select
-                symbol, window_start, close, order_flow_imbalance, trade_count, volume,
-                close / nullif(lag(close) over w, 0) - 1  as ret_1,
-                ln(close / nullif(lag(close) over w, 0))  as log_ret_1
-            from base
-            window w as (partition by symbol order by window_start)
-        ),
-        -- layer 2: rolling aggregates over the layer-1 outputs (no nested windows)
-        rolled as (
-            select
-                symbol, window_start, close, ret_1, log_ret_1,
-                order_flow_imbalance, trade_count,
-                avg(close) over w30                          as sma_30,
-                stddev_samp(log_ret_1) over w30              as volatility_30,
-                avg(order_flow_imbalance) over w6            as ofi_6,
-                volume / nullif(avg(volume) over w30, 0)     as rel_volume,
-                lead(close, 3) over w_order                  as future_close_3
-            from rets
-            window
-                w_order as (partition by symbol order by window_start),
-                w6  as (partition by symbol order by window_start rows between 5 preceding and current row),
-                w30 as (partition by symbol order by window_start rows between 29 preceding and current row)
-        )
-        select
-            symbol, window_start, close,
-            ret_1, log_ret_1,
-            close / nullif(sma_30, 0) - 1 as px_vs_sma30,
-            volatility_30, order_flow_imbalance, ofi_6, rel_volume, trade_count,
-            case when future_close_3 > close then 1 else 0 end as label_up_3
-        from rolled
-        where future_close_3 is not null and volatility_30 is not null
-        """
-    ).df()
+    """Recreate the ML mart in Python if dbt hasn't run. A test checks it matches dbt."""
+    raw = one_bar_per_window(con.execute("select * from raw.ohlcv_10s").df())
+    frames = []
+    for _, bars in raw.groupby("symbol"):
+        df = with_indicators(bars)
+        # Label from the bar exactly 30s later, as in mart_ml_features.sql.
+        future = df[["window_start", "close"]].rename(columns={"close": "future_close_3"})
+        future["window_start"] = future["window_start"] - pd.Timedelta(seconds=30)
+        frames.append(df.merge(future, on="window_start", how="left"))
+    df = pd.concat(frames, ignore_index=True)
+    df = df[df["future_close_3"].notna() & df["volatility_30"].notna()].copy()
+    df["label_up_3"] = (df["future_close_3"] > df["close"]).astype(int)
+    return df
 
 
 def load_training_frame() -> pd.DataFrame:

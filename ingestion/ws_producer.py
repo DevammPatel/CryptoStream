@@ -5,7 +5,7 @@ publishes normalised trade events to a Kafka topic. Designed to run forever with
 automatic reconnection and exponential backoff.
 
 Run locally:   python ingestion/ws_producer.py
-Env vars:      KAFKA_BOOTSTRAP, SYMBOLS, TRADES_TOPIC
+Env vars:      KAFKA_BOOTSTRAP, SYMBOLS, TRADES_TOPIC, BINANCE_WS_BASE
 """
 from __future__ import annotations
 
@@ -31,7 +31,12 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 SYMBOLS = [s.strip().lower() for s in os.getenv("SYMBOLS", "btcusdt,ethusdt,solusdt").split(",") if s.strip()]
 TRADES_TOPIC = os.getenv("TRADES_TOPIC", "crypto.trades")
 
-BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+# Binance's market-data-only endpoint. wss://stream.binance.com:9443/stream?streams=
+# sends the same data but answers HTTP 451 in some regions, such as the US.
+BINANCE_WS_BASE = os.getenv("BINANCE_WS_BASE", "wss://data-stream.binance.vision/stream?streams=")
+
+# HTTP statuses that mean Binance refuses this client, so reconnecting cannot help.
+FATAL_STATUSES = {401, 403, 451}
 
 
 def build_stream_url(symbols: list[str]) -> str:
@@ -78,8 +83,21 @@ def _delivery_report(err, msg) -> None:
         log.warning("delivery failed: %s", err)
 
 
-class GracefulExit(Exception):
-    pass
+def is_fatal(exc: Exception) -> bool:
+    """True when reconnecting cannot help, e.g. HTTP 451 from a restricted region."""
+    return getattr(exc, "status_code", None) in FATAL_STATUSES
+
+
+def publish(producer, event: dict[str, Any]) -> None:
+    kwargs = {"key": event["symbol"].encode(), "value": json.dumps(event).encode(), "callback": _delivery_report}
+    try:
+        producer.produce(TRADES_TOPIC, **kwargs)
+    except BufferError:
+        # The local queue is full because the broker is slow or down: let deliveries
+        # drain, then retry once.
+        producer.poll(1)
+        producer.produce(TRADES_TOPIC, **kwargs)
+    producer.poll(0)
 
 
 async def stream_forever() -> None:
@@ -91,56 +109,58 @@ async def stream_forever() -> None:
 
     backoff = 1
     count = 0
-    while True:
-        try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                log.info("connected to Binance stream")
-                backoff = 1  # reset after a successful connect
-                async for message in ws:
-                    raw = json.loads(message)
-                    event = normalise(raw)
-                    if event is None:
-                        continue
-                    producer.produce(
-                        TRADES_TOPIC,
-                        key=event["symbol"].encode(),
-                        value=json.dumps(event).encode(),
-                        callback=_delivery_report,
-                    )
-                    count += 1
-                    if count % 500 == 0:
-                        producer.poll(0)
-                        log.info("produced %d trades (last %s @ %.2f)", count, event["symbol"], event["price"])
-                    else:
-                        producer.poll(0)
-        except (websockets.ConnectionClosed, OSError) as exc:
-            log.warning("connection dropped (%s); reconnecting in %ss", exc, backoff)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
-        except GracefulExit:
-            break
-        finally:
-            producer.flush(5)
-    log.info("shutting down, flushed producer")
-
-
-def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
-    def _raise(*_):
-        raise GracefulExit()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _raise)
-        except NotImplementedError:  # pragma: no cover (Windows)
-            pass
+    try:
+        while True:
+            try:
+                # Closing waits up to close_timeout at each of up to five steps, and
+                # Binance usually leaves the goodbye unanswered. With 1 s, closing plus the
+                # 5 s flush below always fits in the 20 s stop_grace_period in
+                # docker-compose.yml.
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=1) as ws:
+                    log.info("connected to %s", url.split("/stream")[0])
+                    backoff = 1  # reset after a successful connect
+                    async for message in ws:
+                        try:
+                            event = normalise(json.loads(message))
+                        except (ValueError, KeyError) as exc:
+                            log.warning("skipped a malformed message (%s)", exc)
+                            continue
+                        if event is None:
+                            continue
+                        publish(producer, event)
+                        count += 1
+                        if count % 500 == 0:
+                            log.info("produced %d trades (last %s @ %.2f)", count, event["symbol"], event["price"])
+            except (websockets.WebSocketException, OSError) as exc:
+                if is_fatal(exc):
+                    raise SystemExit(
+                        f"Binance refused the connection ({exc}). If your region is blocked, "
+                        "set BINANCE_WS_BASE to another endpoint."
+                    ) from exc
+                log.warning("connection dropped (%s); reconnecting in %ss", exc, backoff)
+                producer.flush(5)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+    finally:
+        producer.flush(5)
+        log.info("shutting down after %d trades, producer flushed", count)
 
 
 def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    _install_signal_handlers(loop)
+    task = loop.create_task(stream_forever())
+    # Cancelling the task unwinds it at its current await, which runs the flush in
+    # stream_forever's finally block. Raising from a signal handler instead would only
+    # be logged by the event loop, and the process would keep running.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, task.cancel)
+        except NotImplementedError:  # pragma: no cover (Windows)
+            pass
     try:
-        loop.run_until_complete(stream_forever())
-    except GracefulExit:
+        loop.run_until_complete(task)
+    except asyncio.CancelledError:
         pass
     finally:
         loop.close()
