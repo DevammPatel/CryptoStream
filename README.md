@@ -196,3 +196,7 @@ That is a small, real edge, not a trading strategy. Only 45% of labels are "up"
 because a 30-second move of exactly zero counts as "not up". Training splits are purged
 around the 30s label so no test-period price leaks into training, and every run logs
 these baselines next to the model's numbers.
+
+Features from the other coins (BTC's moves, the market's move and order flow) raised
+walk-forward CV AUC by 0.005 on 9 days of data but added nothing on the newest days, so
+the model doesn't use them. The numbers are in [ml/README.md](ml/README.md).

@@ -31,5 +31,7 @@
 - **One machine, no authentication.** The stack is for development and demos: no
   service asks for a password, so every port listens on the local machine only
   (`BIND_ADDRESS` opens them). The SeaweedFS key comes from `.env`.
-- **The model's edge is small.** About 0.525 AUC on a week of real data. Richer
-  features (cross-symbol moves, order-book data) are the obvious next step.
+- **The model's edge is small.** About 0.53 AUC on 9 days of real data. Cross-symbol
+  features helped in walk-forward CV but not on the newest days, so they aren't used
+  (see [ml/README.md](../ml/README.md)). Order-book data is the next thing to try; it
+  needs a depth stream from Binance.
